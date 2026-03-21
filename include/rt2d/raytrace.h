@@ -1,7 +1,7 @@
 #ifndef RT2D_RAYTRACE_H
 #define RT2D_RAYTRACE_H
 
-#include <torch/extension.h>
+#include <torch/types.h>
 
 torch::Tensor raytrace_cpu(
     const torch::Tensor& origins,
@@ -18,4 +18,3 @@ torch::Tensor raytrace_cuda(
 );
 
 #endif
-

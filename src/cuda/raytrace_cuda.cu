@@ -1,8 +1,9 @@
 #include "rt2d/raytrace.h"
 
+#include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAException.h>
-#include <torch/extension.h>
+#include <c10/util/Exception.h>
 
 namespace {
 
@@ -104,4 +105,3 @@ torch::Tensor raytrace_cuda(
 
     return out;
 }
-

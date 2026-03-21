@@ -1,6 +1,8 @@
 #include "rt2d/c_scene.h"
 #include "rt2d/raytrace.h"
 
+#include <ATen/ATen.h>
+#include <c10/util/Exception.h>
 #include <cmath>
 
 namespace {
@@ -82,4 +84,3 @@ torch::Tensor raytrace_cpu(
 
     return out;
 }
-

@@ -1,10 +1,71 @@
-build/
-dist/
-*.egg-info/
+# -----------------------------
+# Build outputs (CMake / Visual Studio / CUDA)
+# -----------------------------
+/build/
+/lib/
+/out/
+/cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+install_manifest.txt
+Makefile
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.obj
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.lib
+*.exp
+*.ilk
+*.pdb
+*.tlog
+*.idb
+*.ipdb
+*.iobj
+
+# -----------------------------
+# Python artifacts
+# -----------------------------
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
 *.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.python-version
+.venv/
+venv/
+env/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+
+# -----------------------------
+# IDE / editor
+# -----------------------------
 .vscode/
 .idea/
+*.code-workspace
 
+# -----------------------------
+# Project-specific generated binaries
+# Keep source .py files in python/rt2d, ignore compiled libs copied by install
+# -----------------------------
+python/rt2d/*.dll
+python/rt2d/*.so
+python/rt2d/*.dylib
+
+# -----------------------------
+# Local datasets
+# -----------------------------
+data/

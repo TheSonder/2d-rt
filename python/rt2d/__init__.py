@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 
 from .loader import load_library
+from .scene import load_scene
 
 
 def raytrace(
@@ -15,5 +16,4 @@ def raytrace(
     return torch.ops.rt2d.raytrace(origins, directions, sphere_center, float(sphere_radius))
 
 
-__all__ = ["load_library", "raytrace"]
-
+__all__ = ["load_library", "load_scene", "raytrace"]

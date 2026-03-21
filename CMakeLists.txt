@@ -17,7 +17,7 @@ endif()
 
 option(RT2D_USE_FETCH_DEPS "Fetch optional GitHub dependencies (fmt, glm)." OFF)
 
-find_package(Python REQUIRED COMPONENTS Interpreter)
+find_package(Python REQUIRED COMPONENTS Interpreter Development)
 
 execute_process(
     COMMAND "${Python_EXECUTABLE}" -c "import torch; print(torch.utils.cmake_prefix_path)"
@@ -72,7 +72,10 @@ add_library(
     src/cuda/raytrace_cuda.cu
 )
 
-target_include_directories(rt2d_torch PRIVATE include)
+target_include_directories(rt2d_torch PRIVATE include ${Python_INCLUDE_DIRS})
+if(Python_LIBRARY_DIRS)
+    target_link_directories(rt2d_torch PRIVATE ${Python_LIBRARY_DIRS})
+endif()
 target_link_libraries(rt2d_torch PRIVATE ${TORCH_LIBRARIES})
 
 if(TARGET fmt::fmt)
@@ -89,7 +92,11 @@ target_compile_definitions(rt2d_torch PRIVATE TORCH_API_INCLUDE_EXTENSION_H)
 target_compile_options(rt2d_torch PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>)
 
 if(MSVC)
-    target_compile_options(rt2d_torch PRIVATE /W4)
+    target_compile_options(
+        rt2d_torch
+        PRIVATE
+        $<$<OR:$<COMPILE_LANGUAGE:C>,$<COMPILE_LANGUAGE:CXX>>:/W4>
+    )
     target_compile_options(rt2d_torch PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/wd4267>)
 else()
     target_compile_options(rt2d_torch PRIVATE -Wall -Wextra -Wpedantic)
