@@ -108,6 +108,28 @@ def _point_on_segment(p: Point, a: Point, b: Point, eps: float) -> bool:
     return True
 
 
+def _point_in_polygon(point: Point, polygon: list[Point], eps: float) -> bool:
+    for i, a in enumerate(polygon):
+        b = polygon[(i + 1) % len(polygon)]
+        if _point_on_segment(point, a, b, eps):
+            return True
+
+    inside = False
+    x, y = point
+    for i, a in enumerate(polygon):
+        b = polygon[(i + 1) % len(polygon)]
+        yi_above = a[1] > y
+        yj_above = b[1] > y
+        if yi_above == yj_above:
+            continue
+
+        x_cross = a[0] + (y - a[1]) * (b[0] - a[0]) / (b[1] - a[1])
+        if x_cross >= x - eps:
+            inside = not inside
+
+    return inside
+
+
 def _clip_interval_geq(
     interval: tuple[float, float] | None,
     slope: float,
@@ -263,8 +285,17 @@ class BoundaryRecord:
     p1: Point
     source: dict[str, int | None]
     mechanism: str
+    sequence: str
     scene_id: str
     tx_id: int
+
+
+@dataclass(frozen=True)
+class InteractionSeed:
+    point: Point
+    sequence: str
+    source: dict[str, int | None]
+    exclude_edge_ids: tuple[int, ...] = ()
 
 
 class UniformGrid:
@@ -432,6 +463,25 @@ def _query_edge_candidates(
     return geom.grid.query_bbox(bbox)
 
 
+def _polygon_points(poly_id: int, geom: GeometryIndex) -> list[Point]:
+    polygon = geom.polygons[poly_id]
+    return [geom.vertices[vertex_id].point for vertex_id in polygon.vertex_ids]
+
+
+def _has_outward_departure(p0: Point, direction: Point, poly_id: int, geom: GeometryIndex) -> bool:
+    eps = geom.epsilon
+    unit = _normalize(direction, eps)
+    if unit is None:
+        return False
+
+    span_x = geom.bounds[2] - geom.bounds[0]
+    span_y = geom.bounds[3] - geom.bounds[1]
+    sample_step = max(max(span_x, span_y) * 1.0e-4, eps * 32.0, 1.0e-3)
+    sample = _add(p0, _scale(unit, sample_step))
+    polygon = _polygon_points(poly_id, geom)
+    return not _point_in_polygon(sample, polygon, eps)
+
+
 def _point_shadowed_by_edge(
     tx: Point,
     p: Point,
@@ -586,23 +636,38 @@ def _extend_to_bounds(origin: Point, direction: Point, geom: GeometryIndex) -> P
     return hits[0]
 
 
-def _first_hit_edge_id(tx: Point, theta: float, geom: GeometryIndex) -> int | None:
-    direction = (math.cos(theta), math.sin(theta))
-    ray_end = _extend_to_bounds(tx, direction, geom)
-    candidates = _query_edge_candidates(tx, ray_end, geom)
+def _trace_to_first_collision(origin: Point, direction: Point, geom: GeometryIndex) -> tuple[Point, int | None]:
+    eps = geom.epsilon
+    unit = _normalize(direction, eps)
+    if unit is None:
+        return (origin, None)
 
+    ray_end = _extend_to_bounds(origin, unit, geom)
+    best_distance = _distance(origin, ray_end)
     best_edge_id: int | None = None
-    best_distance = math.inf
+
+    candidates = _query_edge_candidates(origin, ray_end, geom)
     for edge_id in candidates:
         edge = geom.edges[edge_id]
-        hit_t = _ray_segment_hit_parameter(tx, direction, edge.a, edge.b, geom.epsilon)
+        if _point_on_segment(origin, edge.a, edge.b, eps):
+            continue
+
+        hit_t = _ray_segment_hit_parameter(origin, unit, edge.a, edge.b, eps)
         if hit_t is None:
             continue
-        if hit_t < best_distance:
-            best_distance = hit_t
-            best_edge_id = edge_id
+        if hit_t >= best_distance - eps:
+            continue
 
-    return best_edge_id
+        best_distance = hit_t
+        best_edge_id = edge_id
+
+    return (_add(origin, _scale(unit, best_distance)), best_edge_id)
+
+
+def _first_hit_edge_id(tx: Point, theta: float, geom: GeometryIndex) -> int | None:
+    direction = (math.cos(theta), math.sin(theta))
+    _, edge_id = _trace_to_first_collision(tx, direction, geom)
+    return edge_id
 
 
 def _is_vertex_critical(tx: Point, vertex: VertexRecord, geom: GeometryIndex) -> bool:
@@ -636,6 +701,127 @@ def _source_for_edge_point(edge: EdgeRecord, t: float, geom: GeometryIndex) -> d
     return source
 
 
+def _boundary_type_for_sequence(sequence: str) -> str:
+    if sequence == "L":
+        return "los"
+    if not sequence:
+        raise ValueError("sequence must not be empty.")
+
+    kinds = set(sequence)
+    if kinds == {"R"}:
+        return "reflection"
+    if kinds == {"D"}:
+        return "diffraction"
+    return "mixed"
+
+
+def _mechanism_for_sequence(sequence: str) -> str:
+    if sequence == "L":
+        return "los"
+
+    labels = {"R": "reflection", "D": "diffraction"}
+    return "+".join(labels[item] for item in sequence)
+
+
+def _make_boundary_record(
+    sequence: str,
+    p0: Point,
+    p1: Point,
+    source: dict[str, int | None],
+    scene_id: str,
+    tx_id: int,
+) -> BoundaryRecord:
+    return BoundaryRecord(
+        type=_boundary_type_for_sequence(sequence),
+        p0=p0,
+        p1=p1,
+        source=source,
+        mechanism=_mechanism_for_sequence(sequence),
+        sequence=sequence,
+        scene_id=scene_id,
+        tx_id=tx_id,
+    )
+
+
+def _extract_reflection_boundaries_from_point(
+    source_point: Point,
+    geom: GeometryIndex,
+    tx_id: int,
+    *,
+    sequence_prefix: str = "",
+    exclude_edge_ids: tuple[int, ...] = (),
+) -> list[BoundaryRecord]:
+    boundaries: list[BoundaryRecord] = []
+    sequence = f"{sequence_prefix}R" if sequence_prefix else "R"
+
+    for edge in geom.edges:
+        if edge.edge_id in exclude_edge_ids:
+            continue
+        if not _is_reflective_front_face(source_point, edge, geom):
+            continue
+
+        visible_subsegments = compute_visible_subsegments(source_point, edge, geom)
+        if not visible_subsegments:
+            continue
+
+        image_source = _reflect_point(source_point, edge.a, edge.b, geom.epsilon)
+        for start, end in visible_subsegments:
+            for t in (start, end):
+                p0 = _lerp(edge.a, edge.b, t)
+                direction = _sub(p0, image_source)
+                if not _has_outward_departure(p0, direction, edge.poly_id, geom):
+                    continue
+                p1, _ = _trace_to_first_collision(p0, direction, geom)
+                boundaries.append(
+                    _make_boundary_record(
+                        sequence=sequence,
+                        p0=p0,
+                        p1=p1,
+                        source=_source_for_edge_point(edge, t, geom),
+                        scene_id=geom.scene_id,
+                        tx_id=tx_id,
+                    )
+                )
+
+    return boundaries
+
+
+def _extract_diffraction_boundaries_from_point(
+    source_point: Point,
+    geom: GeometryIndex,
+    tx_id: int,
+    *,
+    sequence_prefix: str = "",
+) -> list[BoundaryRecord]:
+    boundaries: list[BoundaryRecord] = []
+    sequence = f"{sequence_prefix}D" if sequence_prefix else "D"
+
+    for vertex in geom.vertices:
+        if not _is_vertex_critical(source_point, vertex, geom):
+            continue
+
+        direction = _sub(vertex.point, source_point)
+        if not _has_outward_departure(vertex.point, direction, vertex.poly_id, geom):
+            continue
+        p1, _ = _trace_to_first_collision(vertex.point, direction, geom)
+        boundaries.append(
+            _make_boundary_record(
+                sequence=sequence,
+                p0=vertex.point,
+                p1=p1,
+                source={
+                    "poly_id": vertex.poly_id,
+                    "edge_id": None,
+                    "vertex_id": vertex.vertex_id,
+                },
+                scene_id=geom.scene_id,
+                tx_id=tx_id,
+            )
+        )
+
+    return boundaries
+
+
 def extract_los_boundaries(tx: Point, geom: GeometryIndex, tx_id: int = 0) -> list[BoundaryRecord]:
     boundaries: list[BoundaryRecord] = []
     critical_vertices = {
@@ -654,14 +840,16 @@ def extract_los_boundaries(tx: Point, geom: GeometryIndex, tx_id: int = 0) -> li
                     continue
 
                 p0 = _lerp(edge.a, edge.b, t)
-                p1 = _extend_to_bounds(p0, _sub(p0, tx), geom)
+                direction = _sub(p0, tx)
+                if not _has_outward_departure(p0, direction, edge.poly_id, geom):
+                    continue
+                p1, _ = _trace_to_first_collision(p0, direction, geom)
                 boundaries.append(
-                    BoundaryRecord(
-                        type="los",
+                    _make_boundary_record(
+                        sequence="L",
                         p0=p0,
                         p1=p1,
                         source=source,
-                        mechanism="los",
                         scene_id=geom.scene_id,
                         tx_id=tx_id,
                     )
@@ -675,34 +863,7 @@ def extract_reflection_boundaries(
     geom: GeometryIndex,
     tx_id: int = 0,
 ) -> list[BoundaryRecord]:
-    boundaries: list[BoundaryRecord] = []
-
-    for edge in geom.edges:
-        if not _is_reflective_front_face(tx, edge, geom):
-            continue
-
-        visible_subsegments = compute_visible_subsegments(tx, edge, geom)
-        if not visible_subsegments:
-            continue
-
-        image_tx = _reflect_point(tx, edge.a, edge.b, geom.epsilon)
-        for start, end in visible_subsegments:
-            for t in (start, end):
-                p0 = _lerp(edge.a, edge.b, t)
-                p1 = _extend_to_bounds(p0, _sub(p0, image_tx), geom)
-                boundaries.append(
-                    BoundaryRecord(
-                        type="reflection",
-                        p0=p0,
-                        p1=p1,
-                        source=_source_for_edge_point(edge, t, geom),
-                        mechanism="reflection",
-                        scene_id=geom.scene_id,
-                        tx_id=tx_id,
-                    )
-                )
-
-    return boundaries
+    return _extract_reflection_boundaries_from_point(tx, geom, tx_id)
 
 
 def extract_diffraction_events(
@@ -710,26 +871,7 @@ def extract_diffraction_events(
     geom: GeometryIndex,
     tx_id: int = 0,
 ) -> list[BoundaryRecord]:
-    events: list[BoundaryRecord] = []
-    for vertex in geom.vertices:
-        if not _is_vertex_critical(tx, vertex, geom):
-            continue
-        events.append(
-            BoundaryRecord(
-                type="diffraction",
-                p0=vertex.point,
-                p1=vertex.point,
-                source={
-                    "poly_id": vertex.poly_id,
-                    "edge_id": None,
-                    "vertex_id": vertex.vertex_id,
-                },
-                mechanism="diffraction",
-                scene_id=geom.scene_id,
-                tx_id=tx_id,
-            )
-        )
-    return events
+    return _extract_diffraction_boundaries_from_point(tx, geom, tx_id)
 
 
 def _segment_key(boundary: BoundaryRecord, eps: float) -> tuple[Any, ...]:
@@ -740,6 +882,7 @@ def _segment_key(boundary: BoundaryRecord, eps: float) -> tuple[Any, ...]:
 
     return (
         boundary.type,
+        boundary.sequence,
         q(boundary.p0),
         q(boundary.p1),
         boundary.source.get("poly_id"),
@@ -766,7 +909,7 @@ def merge_and_label_boundaries(
 
     for group in boundary_groups:
         for boundary in group:
-            if boundary.type != "diffraction" and _distance(boundary.p0, boundary.p1) <= epsilon:
+            if _distance(boundary.p0, boundary.p1) <= epsilon:
                 continue
 
             key = _segment_key(boundary, epsilon)
@@ -775,30 +918,7 @@ def merge_and_label_boundaries(
             seen[key] = boundary
             merged.append(boundary)
 
-    diffraction_keys = {
-        _geometry_only_key(boundary, epsilon)
-        for boundary in merged
-        if boundary.type == "diffraction"
-    }
-
-    relabeled: list[BoundaryRecord] = []
-    for boundary in merged:
-        if boundary.type in {"los", "reflection"} and _geometry_only_key(boundary, epsilon) in diffraction_keys:
-            relabeled.append(
-                BoundaryRecord(
-                    type="mixed",
-                    p0=boundary.p0,
-                    p1=boundary.p1,
-                    source=boundary.source,
-                    mechanism=f"{boundary.mechanism}+diffraction",
-                    scene_id=boundary.scene_id,
-                    tx_id=boundary.tx_id,
-                )
-            )
-            continue
-        relabeled.append(boundary)
-
-    return relabeled
+    return merged
 
 
 def export_boundaries_json(
@@ -816,6 +936,7 @@ def export_boundaries_json(
                 "p1": [boundary.p1[0], boundary.p1[1]],
                 "source": boundary.source,
                 "mechanism": boundary.mechanism,
+                "sequence": boundary.sequence,
                 "scene_id": boundary.scene_id,
                 "tx_id": boundary.tx_id,
             }
@@ -836,9 +957,15 @@ def extract_scene_boundaries(
     *,
     tx_ids: list[int] | None = None,
     root_dir: str | None = None,
+    max_interactions: int = 1,
     epsilon: float = 1.0e-6,
     output_path: str | Path | None = None,
 ) -> dict[str, Any]:
+    if max_interactions < 0:
+        raise ValueError("max_interactions must be >= 0.")
+    if max_interactions > 2:
+        raise NotImplementedError("max_interactions > 2 is not implemented yet.")
+
     if isinstance(scene, dict):
         scene_data = scene
     else:
@@ -851,13 +978,67 @@ def extract_scene_boundaries(
     for tx_id in indices:
         tx = geom.antennas[tx_id]
         los = extract_los_boundaries(tx, geom, tx_id=tx_id)
-        reflection = extract_reflection_boundaries(tx, geom, tx_id=tx_id)
-        diffraction = extract_diffraction_events(tx, geom, tx_id=tx_id)
+        reflection: list[BoundaryRecord] = []
+        diffraction: list[BoundaryRecord] = []
+        rr: list[BoundaryRecord] = []
+        rd: list[BoundaryRecord] = []
+        dr: list[BoundaryRecord] = []
+
+        if max_interactions >= 1:
+            reflection = extract_reflection_boundaries(tx, geom, tx_id=tx_id)
+            diffraction = extract_diffraction_events(tx, geom, tx_id=tx_id)
+
+        if max_interactions >= 2:
+            for boundary in reflection:
+                edge_id = boundary.source.get("edge_id")
+                exclude = (int(edge_id),) if edge_id is not None else ()
+                seed = InteractionSeed(
+                    point=boundary.p0,
+                    sequence=boundary.sequence,
+                    source=boundary.source,
+                    exclude_edge_ids=exclude,
+                )
+                rr.extend(
+                    _extract_reflection_boundaries_from_point(
+                        seed.point,
+                        geom,
+                        tx_id,
+                        sequence_prefix=seed.sequence,
+                        exclude_edge_ids=seed.exclude_edge_ids,
+                    )
+                )
+                rd.extend(
+                    _extract_diffraction_boundaries_from_point(
+                        seed.point,
+                        geom,
+                        tx_id,
+                        sequence_prefix=seed.sequence,
+                    )
+                )
+
+            for boundary in diffraction:
+                seed = InteractionSeed(
+                    point=boundary.p0,
+                    sequence=boundary.sequence,
+                    source=boundary.source,
+                )
+                dr.extend(
+                    _extract_reflection_boundaries_from_point(
+                        seed.point,
+                        geom,
+                        tx_id,
+                        sequence_prefix=seed.sequence,
+                    )
+                )
+
         boundaries.extend(
             merge_and_label_boundaries(
                 los,
                 reflection,
                 diffraction,
+                rr,
+                rd,
+                dr,
                 epsilon=geom.epsilon,
             )
         )

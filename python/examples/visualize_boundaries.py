@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,10 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 
+PROJECT_PYTHON_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_PYTHON_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_PYTHON_ROOT))
+
 import rt2d
 
 TYPE_STYLES = {
@@ -19,20 +24,6 @@ TYPE_STYLES = {
     "diffraction": {"color": "#1D4ED8", "linewidth": 0.0, "alpha": 0.95, "label": "Diffraction"},
     "mixed": {"color": "#7C3AED", "linewidth": 1.4, "alpha": 0.9, "label": "Mixed"},
 }
-
-
-def _load_payload(
-    scene_id: str,
-    tx_ids: list[int] | None,
-    boundary_json: Path | None,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    scene = rt2d.load_scene(scene_id)
-    if boundary_json is None:
-        payload = rt2d.extract_scene_boundaries(scene, tx_ids=tx_ids)
-        return scene, payload
-
-    payload = json.loads(boundary_json.read_text(encoding="utf-8"))
-    return scene, payload
 
 
 def _plot_scene(ax: plt.Axes, scene: dict[str, Any], highlight_tx_ids: set[int]) -> None:
@@ -72,9 +63,7 @@ def _plot_boundaries(ax: plt.Axes, boundaries: list[dict[str, Any]], highlight_t
         p0 = boundary["p0"]
         p1 = boundary["p1"]
 
-        if boundary_type == "diffraction" or (
-            abs(p0[0] - p1[0]) < 1.0e-9 and abs(p0[1] - p1[1]) < 1.0e-9
-        ):
+        if abs(p0[0] - p1[0]) < 1.0e-9 and abs(p0[1] - p1[1]) < 1.0e-9:
             ax.scatter(
                 p0[0],
                 p0[1],
@@ -105,24 +94,13 @@ def _build_legend(ax: plt.Axes, counts: dict[str, int]) -> None:
         if count == 0:
             continue
 
-        if boundary_type == "diffraction":
-            handle = plt.Line2D(
-                [0],
-                [0],
-                marker="o",
-                color="w",
-                markerfacecolor=style["color"],
-                markersize=6,
-                linewidth=0,
-            )
-        else:
-            handle = plt.Line2D(
-                [0],
-                [0],
-                color=style["color"],
-                linewidth=style["linewidth"],
-                alpha=style["alpha"],
-            )
+        handle = plt.Line2D(
+            [0],
+            [0],
+            color=style["color"],
+            linewidth=style["linewidth"],
+            alpha=style["alpha"],
+        )
         handles.append(handle)
         labels.append(f"{style['label']} ({count})")
 
@@ -160,12 +138,26 @@ def main() -> None:
         default=(10.0, 10.0),
         help="Figure size in inches.",
     )
+    parser.add_argument(
+        "--max-interactions",
+        type=int,
+        default=1,
+        help="Maximum environment interactions to expand when extracting on the fly. Supported: 0, 1, 2.",
+    )
     args = parser.parse_args()
 
     output = args.output or Path("build") / f"scene_{args.scene_id}_boundaries.png"
     highlight_tx_ids = set(args.tx_ids or [])
 
-    scene, payload = _load_payload(args.scene_id, args.tx_ids, args.boundary_json)
+    scene = rt2d.load_scene(args.scene_id)
+    if args.boundary_json is None:
+        payload = rt2d.extract_scene_boundaries(
+            scene,
+            tx_ids=args.tx_ids,
+            max_interactions=args.max_interactions,
+        )
+    else:
+        payload = json.loads(args.boundary_json.read_text(encoding="utf-8"))
     if not highlight_tx_ids:
         highlight_tx_ids = {int(boundary["tx_id"]) for boundary in payload["boundaries"]}
 
