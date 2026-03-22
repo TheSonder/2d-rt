@@ -25,6 +25,11 @@ TYPE_STYLES = {
     "mixed": {"color": "#7C3AED", "linewidth": 1.4, "alpha": 0.9, "label": "Mixed"},
 }
 
+ROLE_STYLE_OVERRIDES = {
+    "reflection_face": {"color": "#C84C09", "linewidth": 1.0, "alpha": 0.8, "label": "Reflection Face"},
+    "reflection_shadow": {"color": "#6D28D9", "linewidth": 2.0, "alpha": 0.95, "label": "Reflection Shadow"},
+}
+
 
 def _plot_scene(ax: plt.Axes, scene: dict[str, Any], highlight_tx_ids: set[int]) -> None:
     for polygon in scene["polygons"]:
@@ -47,7 +52,7 @@ def _plot_scene(ax: plt.Axes, scene: dict[str, Any], highlight_tx_ids: set[int])
 
 
 def _plot_boundaries(ax: plt.Axes, boundaries: list[dict[str, Any]], highlight_tx_ids: set[int]) -> dict[str, int]:
-    counts = {key: 0 for key in TYPE_STYLES}
+    counts: dict[str, int] = {}
 
     for boundary in boundaries:
         tx_id = int(boundary["tx_id"])
@@ -55,11 +60,13 @@ def _plot_boundaries(ax: plt.Axes, boundaries: list[dict[str, Any]], highlight_t
             continue
 
         boundary_type = str(boundary["type"])
-        style = TYPE_STYLES.get(boundary_type)
+        role = str(boundary.get("role", ""))
+        style = ROLE_STYLE_OVERRIDES.get(role, TYPE_STYLES.get(boundary_type))
         if style is None:
             continue
 
-        counts[boundary_type] += 1
+        legend_key = role if role in ROLE_STYLE_OVERRIDES else boundary_type
+        counts[legend_key] = counts.get(legend_key, 0) + 1
         p0 = boundary["p0"]
         p1 = boundary["p1"]
 
@@ -89,8 +96,15 @@ def _plot_boundaries(ax: plt.Axes, boundaries: list[dict[str, Any]], highlight_t
 def _build_legend(ax: plt.Axes, counts: dict[str, int]) -> None:
     handles = []
     labels = []
-    for boundary_type, style in TYPE_STYLES.items():
-        count = counts[boundary_type]
+    ordered_styles = {
+        "los": TYPE_STYLES["los"],
+        "reflection_face": ROLE_STYLE_OVERRIDES["reflection_face"],
+        "reflection_shadow": ROLE_STYLE_OVERRIDES["reflection_shadow"],
+        "diffraction": TYPE_STYLES["diffraction"],
+        "mixed": TYPE_STYLES["mixed"],
+    }
+    for boundary_type, style in ordered_styles.items():
+        count = counts.get(boundary_type, 0)
         if count == 0:
             continue
 

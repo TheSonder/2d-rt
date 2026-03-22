@@ -286,15 +286,19 @@ class BoundaryRecord:
     source: dict[str, int | None]
     mechanism: str
     sequence: str
+    role: str
     scene_id: str
     tx_id: int
 
 
 @dataclass(frozen=True)
-class InteractionSeed:
-    point: Point
+class TubeState:
     sequence: str
-    source: dict[str, int | None]
+    source_point: Point
+    apex: Point
+    left_dir: Point | None
+    right_dir: Point | None
+    boundary_points: tuple[Point, Point] | None
     exclude_edge_ids: tuple[int, ...] = ()
 
 
@@ -526,6 +530,23 @@ def is_visible(tx: Point, p: Point, geom: GeometryIndex) -> bool:
     return True
 
 
+def is_visible_with_exclusions(
+    tx: Point,
+    p: Point,
+    geom: GeometryIndex,
+    exclude_edge_ids: tuple[int, ...] = (),
+) -> bool:
+    excluded = set(exclude_edge_ids)
+    candidates = _query_edge_candidates(tx, p, geom)
+    for edge_id in candidates:
+        if edge_id in excluded:
+            continue
+        edge = geom.edges[edge_id]
+        if _point_shadowed_by_edge(tx, p, edge, geom):
+            return False
+    return True
+
+
 def _shadow_interval_on_edge(
     tx: Point,
     target_edge: EdgeRecord,
@@ -575,7 +596,9 @@ def compute_visible_subsegments(
     tx: Point,
     edge: EdgeRecord,
     geom: GeometryIndex,
+    exclude_edge_ids: tuple[int, ...] = (),
 ) -> list[tuple[float, float]]:
+    excluded = set(exclude_edge_ids)
     candidates = _query_edge_candidates(tx, edge.a, geom)
     candidates.update(_query_edge_candidates(tx, edge.b, geom))
     triangle_bbox = _bbox_of_points([tx, edge.a, edge.b])
@@ -583,6 +606,8 @@ def compute_visible_subsegments(
 
     blocked: list[tuple[float, float]] = []
     for edge_id in candidates:
+        if edge_id in excluded:
+            continue
         occluder = geom.edges[edge_id]
         if occluder.edge_id == edge.edge_id:
             continue
@@ -598,7 +623,7 @@ def compute_visible_subsegments(
     filtered: list[tuple[float, float]] = []
     for start, end in visible:
         mid = (start + end) * 0.5
-        if is_visible(tx, _lerp(edge.a, edge.b, mid), geom):
+        if is_visible_with_exclusions(tx, _lerp(edge.a, edge.b, mid), geom, exclude_edge_ids):
             filtered.append((start, end))
 
     return _unique_intervals(filtered, geom.epsilon)
@@ -723,6 +748,113 @@ def _mechanism_for_sequence(sequence: str) -> str:
     return "+".join(labels[item] for item in sequence)
 
 
+def _angle_of(point: Point, apex: Point) -> float:
+    return math.atan2(point[1] - apex[1], point[0] - apex[0])
+
+
+def _order_points_by_angle(apex: Point, p0: Point, p1: Point) -> tuple[Point, Point]:
+    a0 = _angle_of(p0, apex)
+    a1 = _angle_of(p1, apex)
+    if a0 <= a1:
+        return (p0, p1)
+    return (p1, p0)
+
+
+def _make_tube_state(
+    sequence: str,
+    source_point: Point,
+    boundary_points: tuple[Point, Point] | None,
+    *,
+    exclude_edge_ids: tuple[int, ...] = (),
+) -> TubeState:
+    if boundary_points is None:
+        return TubeState(
+            sequence=sequence,
+            source_point=source_point,
+            apex=source_point,
+            left_dir=None,
+            right_dir=None,
+            boundary_points=None,
+            exclude_edge_ids=exclude_edge_ids,
+        )
+
+    left_point, right_point = _order_points_by_angle(source_point, boundary_points[0], boundary_points[1])
+    left_dir = _normalize(_sub(left_point, source_point), 1.0e-12)
+    right_dir = _normalize(_sub(right_point, source_point), 1.0e-12)
+    if left_dir is None or right_dir is None:
+        left_dir = None
+        right_dir = None
+
+    return TubeState(
+        sequence=sequence,
+        source_point=source_point,
+        apex=source_point,
+        left_dir=left_dir,
+        right_dir=right_dir,
+        boundary_points=(left_point, right_point),
+        exclude_edge_ids=exclude_edge_ids,
+    )
+
+
+def _point_in_tube(state: TubeState, point: Point, eps: float) -> bool:
+    if state.left_dir is None or state.right_dir is None:
+        return True
+
+    q = _sub(point, state.apex)
+    if _length(q) <= eps:
+        return True
+
+    return _cross(state.left_dir, q) >= -eps and _cross(q, state.right_dir) >= -eps
+
+
+def _clip_interval_to_tube(
+    state: TubeState,
+    edge: EdgeRecord,
+    geom: GeometryIndex,
+) -> list[tuple[float, float]]:
+    if state.left_dir is None or state.right_dir is None:
+        return [(0.0, 1.0)]
+
+    eps = geom.epsilon
+    interval: tuple[float, float] | None = (0.0, 1.0)
+    edge_vec = _sub(edge.b, edge.a)
+    q0 = _sub(edge.a, state.apex)
+
+    interval = _clip_interval_geq(interval, _cross(state.left_dir, edge_vec), _cross(state.left_dir, q0), eps)
+    if interval is None:
+        return []
+    interval = _clip_interval_geq(interval, _cross(_scale(edge_vec, -1.0), state.right_dir), _cross(q0, state.right_dir), eps)
+    if interval is None:
+        return []
+
+    start, end = interval
+    if end - start <= eps:
+        return []
+    return [(start, end)]
+
+
+def _intersect_intervals(
+    left: list[tuple[float, float]],
+    right: list[tuple[float, float]],
+    eps: float,
+) -> list[tuple[float, float]]:
+    result: list[tuple[float, float]] = []
+    for a0, a1 in left:
+        for b0, b1 in right:
+            start = max(a0, b0)
+            end = min(a1, b1)
+            if end - start > eps:
+                result.append((start, end))
+    return _unique_intervals(result, eps)
+
+
+def _append_unique_point(points: list[Point], point: Point, eps: float) -> None:
+    for existing in points:
+        if _same_point(existing, point, eps):
+            return
+    points.append(point)
+
+
 def _make_boundary_record(
     sequence: str,
     p0: Point,
@@ -730,6 +862,7 @@ def _make_boundary_record(
     source: dict[str, int | None],
     scene_id: str,
     tx_id: int,
+    role: str = "default",
 ) -> BoundaryRecord:
     return BoundaryRecord(
         type=_boundary_type_for_sequence(sequence),
@@ -738,36 +871,202 @@ def _make_boundary_record(
         source=source,
         mechanism=_mechanism_for_sequence(sequence),
         sequence=sequence,
+        role=role,
         scene_id=scene_id,
         tx_id=tx_id,
     )
 
 
-def _extract_reflection_boundaries_from_point(
-    source_point: Point,
+def _compute_visible_subsegments_for_state(
+    state: TubeState,
+    edge: EdgeRecord,
+    geom: GeometryIndex,
+) -> list[tuple[float, float]]:
+    visible = compute_visible_subsegments(
+        state.source_point,
+        edge,
+        geom,
+        exclude_edge_ids=state.exclude_edge_ids,
+    )
+    tube_intervals = _clip_interval_to_tube(state, edge, geom)
+    return _intersect_intervals(visible, tube_intervals, geom.epsilon)
+
+
+def _extract_state_visibility_boundaries(
+    state: TubeState,
     geom: GeometryIndex,
     tx_id: int,
-    *,
-    sequence_prefix: str = "",
-    exclude_edge_ids: tuple[int, ...] = (),
 ) -> list[BoundaryRecord]:
+    if not state.sequence:
+        return []
+
+    if state.sequence == "L":
+        boundaries: list[BoundaryRecord] = []
+        critical_vertices = {
+            vertex.vertex_id
+            for vertex in geom.vertices
+            if _point_in_tube(state, vertex.point, geom.epsilon)
+            and _is_vertex_critical(state.source_point, vertex, geom)
+        }
+
+        for edge in geom.edges:
+            if edge.edge_id in state.exclude_edge_ids:
+                continue
+
+            visible_subsegments = _compute_visible_subsegments_for_state(state, edge, geom)
+            if not visible_subsegments:
+                continue
+
+            for start, end in visible_subsegments:
+                for t in (start, end):
+                    source = _source_for_edge_point(edge, t, geom)
+                    vertex_id = source["vertex_id"]
+                    if vertex_id is not None and vertex_id not in critical_vertices:
+                        continue
+
+                    p0 = _lerp(edge.a, edge.b, t)
+                    direction = _sub(p0, state.source_point)
+                    if not _has_outward_departure(p0, direction, edge.poly_id, geom):
+                        continue
+                    p1, _ = _trace_to_first_collision(p0, direction, geom)
+                    boundaries.append(
+                        _make_boundary_record(
+                            sequence=state.sequence,
+                            p0=p0,
+                            p1=p1,
+                            source=source,
+                            scene_id=geom.scene_id,
+                            tx_id=tx_id,
+                            role="visibility" if state.sequence == "L" else "reflection_shadow",
+                        )
+                    )
+
+        return boundaries
+
     boundaries: list[BoundaryRecord] = []
-    sequence = f"{sequence_prefix}R" if sequence_prefix else "R"
+    polygon_points: dict[int, list[tuple[Point, dict[str, int | None], str]]] = {}
+
+    for vertex in geom.vertices:
+        if not _point_in_tube(state, vertex.point, geom.epsilon):
+            continue
+        if not is_visible_with_exclusions(
+            state.source_point,
+            vertex.point,
+            geom,
+            state.exclude_edge_ids,
+        ):
+            continue
+        if not _has_outward_departure(
+            vertex.point,
+            _sub(vertex.point, state.source_point),
+            vertex.poly_id,
+            geom,
+        ):
+            continue
+
+        bucket = polygon_points.setdefault(vertex.poly_id, [])
+        if any(_same_point(vertex.point, existing[0], geom.epsilon) for existing in bucket):
+            continue
+        bucket.append(
+            (
+                vertex.point,
+                {
+                    "poly_id": vertex.poly_id,
+                    "edge_id": None,
+                    "vertex_id": vertex.vertex_id,
+                },
+                "vertex",
+            )
+        )
 
     for edge in geom.edges:
-        if edge.edge_id in exclude_edge_ids:
-            continue
-        if not _is_reflective_front_face(source_point, edge, geom):
+        if edge.edge_id in state.exclude_edge_ids:
             continue
 
-        visible_subsegments = compute_visible_subsegments(source_point, edge, geom)
+        visible_subsegments = _compute_visible_subsegments_for_state(state, edge, geom)
         if not visible_subsegments:
             continue
 
-        image_source = _reflect_point(source_point, edge.a, edge.b, geom.epsilon)
+        bucket = polygon_points.setdefault(edge.poly_id, [])
+        unique_points: list[Point] = [item[0] for item in bucket]
+
         for start, end in visible_subsegments:
             for t in (start, end):
                 p0 = _lerp(edge.a, edge.b, t)
+                direction = _sub(p0, state.source_point)
+                if not _has_outward_departure(p0, direction, edge.poly_id, geom):
+                    continue
+                if any(_same_point(p0, existing, geom.epsilon) for existing in unique_points):
+                    continue
+                bucket.append((p0, _source_for_edge_point(edge, t, geom), "edge"))
+                unique_points.append(p0)
+
+    for poly_id, entries in polygon_points.items():
+        if len(entries) < 2:
+            continue
+
+        vertex_entries = [item for item in entries if item[2] == "vertex"]
+        active_entries = vertex_entries if len(vertex_entries) >= 2 else entries
+
+        ordered = sorted(active_entries, key=lambda item: _angle_of(item[0], state.source_point))
+        selected = [ordered[0], ordered[-1]]
+        if _same_point(selected[0][0], selected[1][0], geom.epsilon):
+            continue
+
+        for p0, source, _kind in selected:
+            direction = _sub(p0, state.source_point)
+            p1, _ = _trace_to_first_collision(p0, direction, geom)
+            boundaries.append(
+                _make_boundary_record(
+                    sequence=state.sequence,
+                    p0=p0,
+                    p1=p1,
+                    source=source,
+                    scene_id=geom.scene_id,
+                    tx_id=tx_id,
+                    role="reflection_shadow",
+                )
+            )
+
+    return boundaries
+
+
+def _extract_reflection_successors(
+    state: TubeState,
+    geom: GeometryIndex,
+    tx_id: int,
+) -> tuple[list[BoundaryRecord], list[TubeState]]:
+    boundaries: list[BoundaryRecord] = []
+    children: list[TubeState] = []
+    sequence = f"{state.sequence}R" if state.sequence else "R"
+
+    for edge in geom.edges:
+        if edge.edge_id in state.exclude_edge_ids:
+            continue
+        if not _is_reflective_front_face(state.source_point, edge, geom):
+            continue
+
+        visible_subsegments = _compute_visible_subsegments_for_state(state, edge, geom)
+        if not visible_subsegments:
+            continue
+
+        image_source = _reflect_point(state.source_point, edge.a, edge.b, geom.epsilon)
+        for start, end in visible_subsegments:
+            left_point = _lerp(edge.a, edge.b, start)
+            right_point = _lerp(edge.a, edge.b, end)
+            left_point, right_point = _order_points_by_angle(image_source, left_point, right_point)
+
+            child_state = _make_tube_state(
+                sequence,
+                image_source,
+                (left_point, right_point),
+                exclude_edge_ids=tuple(
+                    sorted(set(state.exclude_edge_ids).union(geom.polygons[edge.poly_id].edge_ids))
+                ),
+            )
+            children.append(child_state)
+
+            for t, p0 in ((start, left_point), (end, right_point)):
                 direction = _sub(p0, image_source)
                 if not _has_outward_departure(p0, direction, edge.poly_id, geom):
                     continue
@@ -780,27 +1079,29 @@ def _extract_reflection_boundaries_from_point(
                         source=_source_for_edge_point(edge, t, geom),
                         scene_id=geom.scene_id,
                         tx_id=tx_id,
+                        role="reflection_face",
                     )
                 )
 
-    return boundaries
+    return (boundaries, children)
 
 
-def _extract_diffraction_boundaries_from_point(
-    source_point: Point,
+def _extract_diffraction_successors(
+    state: TubeState,
     geom: GeometryIndex,
     tx_id: int,
-    *,
-    sequence_prefix: str = "",
-) -> list[BoundaryRecord]:
+) -> tuple[list[BoundaryRecord], list[TubeState]]:
     boundaries: list[BoundaryRecord] = []
-    sequence = f"{sequence_prefix}D" if sequence_prefix else "D"
+    children: list[TubeState] = []
+    sequence = f"{state.sequence}D" if state.sequence else "D"
 
     for vertex in geom.vertices:
-        if not _is_vertex_critical(source_point, vertex, geom):
+        if not _point_in_tube(state, vertex.point, geom.epsilon):
+            continue
+        if not _is_vertex_critical(state.source_point, vertex, geom):
             continue
 
-        direction = _sub(vertex.point, source_point)
+        direction = _sub(vertex.point, state.source_point)
         if not _has_outward_departure(vertex.point, direction, vertex.poly_id, geom):
             continue
         p1, _ = _trace_to_first_collision(vertex.point, direction, geom)
@@ -816,46 +1117,27 @@ def _extract_diffraction_boundaries_from_point(
                 },
                 scene_id=geom.scene_id,
                 tx_id=tx_id,
+                role="diffraction_edge",
+            )
+        )
+        children.append(
+            _make_tube_state(
+                sequence,
+                vertex.point,
+                None,
+                exclude_edge_ids=(
+                    vertex.prev_edge_id,
+                    vertex.next_edge_id,
+                ),
             )
         )
 
-    return boundaries
+    return (boundaries, children)
 
 
 def extract_los_boundaries(tx: Point, geom: GeometryIndex, tx_id: int = 0) -> list[BoundaryRecord]:
-    boundaries: list[BoundaryRecord] = []
-    critical_vertices = {
-        vertex.vertex_id
-        for vertex in geom.vertices
-        if _is_vertex_critical(tx, vertex, geom)
-    }
-
-    for edge in geom.edges:
-        visible_subsegments = compute_visible_subsegments(tx, edge, geom)
-        for start, end in visible_subsegments:
-            for t in (start, end):
-                source = _source_for_edge_point(edge, t, geom)
-                vertex_id = source["vertex_id"]
-                if vertex_id is not None and vertex_id not in critical_vertices:
-                    continue
-
-                p0 = _lerp(edge.a, edge.b, t)
-                direction = _sub(p0, tx)
-                if not _has_outward_departure(p0, direction, edge.poly_id, geom):
-                    continue
-                p1, _ = _trace_to_first_collision(p0, direction, geom)
-                boundaries.append(
-                    _make_boundary_record(
-                        sequence="L",
-                        p0=p0,
-                        p1=p1,
-                        source=source,
-                        scene_id=geom.scene_id,
-                        tx_id=tx_id,
-                    )
-                )
-
-    return boundaries
+    state = _make_tube_state("L", tx, None)
+    return _extract_state_visibility_boundaries(state, geom, tx_id)
 
 
 def extract_reflection_boundaries(
@@ -863,7 +1145,9 @@ def extract_reflection_boundaries(
     geom: GeometryIndex,
     tx_id: int = 0,
 ) -> list[BoundaryRecord]:
-    return _extract_reflection_boundaries_from_point(tx, geom, tx_id)
+    state = _make_tube_state("", tx, None)
+    boundaries, _ = _extract_reflection_successors(state, geom, tx_id)
+    return boundaries
 
 
 def extract_diffraction_events(
@@ -871,7 +1155,9 @@ def extract_diffraction_events(
     geom: GeometryIndex,
     tx_id: int = 0,
 ) -> list[BoundaryRecord]:
-    return _extract_diffraction_boundaries_from_point(tx, geom, tx_id)
+    state = _make_tube_state("", tx, None)
+    boundaries, _ = _extract_diffraction_successors(state, geom, tx_id)
+    return boundaries
 
 
 def _segment_key(boundary: BoundaryRecord, eps: float) -> tuple[Any, ...]:
@@ -889,15 +1175,6 @@ def _segment_key(boundary: BoundaryRecord, eps: float) -> tuple[Any, ...]:
         boundary.source.get("edge_id"),
         boundary.source.get("vertex_id"),
     )
-
-
-def _geometry_only_key(boundary: BoundaryRecord, eps: float) -> tuple[Any, ...]:
-    scale = max(1.0 / max(eps, 1.0e-9), 1.0e3)
-
-    def q(point: Point) -> tuple[int, int]:
-        return (int(round(point[0] * scale)), int(round(point[1] * scale)))
-
-    return (q(boundary.p0), q(boundary.p1))
 
 
 def merge_and_label_boundaries(
@@ -937,6 +1214,7 @@ def export_boundaries_json(
                 "source": boundary.source,
                 "mechanism": boundary.mechanism,
                 "sequence": boundary.sequence,
+                "role": boundary.role,
                 "scene_id": boundary.scene_id,
                 "tx_id": boundary.tx_id,
             }
@@ -977,68 +1255,39 @@ def extract_scene_boundaries(
     boundaries: list[BoundaryRecord] = []
     for tx_id in indices:
         tx = geom.antennas[tx_id]
-        los = extract_los_boundaries(tx, geom, tx_id=tx_id)
-        reflection: list[BoundaryRecord] = []
-        diffraction: list[BoundaryRecord] = []
-        rr: list[BoundaryRecord] = []
-        rd: list[BoundaryRecord] = []
-        dr: list[BoundaryRecord] = []
+        root_state = _make_tube_state("", tx, None)
+        los = _extract_state_visibility_boundaries(_make_tube_state("L", tx, None), geom, tx_id)
+        interaction_boundaries: list[BoundaryRecord] = []
 
         if max_interactions >= 1:
-            reflection = extract_reflection_boundaries(tx, geom, tx_id=tx_id)
-            diffraction = extract_diffraction_events(tx, geom, tx_id=tx_id)
+            frontier = [root_state]
+            for depth in range(1, max_interactions + 1):
+                next_frontier: list[TubeState] = []
+                for state in frontier:
+                    reflection_boundaries, reflection_children = _extract_reflection_successors(state, geom, tx_id)
+                    interaction_boundaries.extend(reflection_boundaries)
+                    next_frontier.extend(reflection_children)
 
-        if max_interactions >= 2:
-            for boundary in reflection:
-                edge_id = boundary.source.get("edge_id")
-                exclude = (int(edge_id),) if edge_id is not None else ()
-                seed = InteractionSeed(
-                    point=boundary.p0,
-                    sequence=boundary.sequence,
-                    source=boundary.source,
-                    exclude_edge_ids=exclude,
-                )
-                rr.extend(
-                    _extract_reflection_boundaries_from_point(
-                        seed.point,
-                        geom,
-                        tx_id,
-                        sequence_prefix=seed.sequence,
-                        exclude_edge_ids=seed.exclude_edge_ids,
-                    )
-                )
-                rd.extend(
-                    _extract_diffraction_boundaries_from_point(
-                        seed.point,
-                        geom,
-                        tx_id,
-                        sequence_prefix=seed.sequence,
-                    )
-                )
+                    if state.sequence.endswith("D"):
+                        continue
 
-            for boundary in diffraction:
-                seed = InteractionSeed(
-                    point=boundary.p0,
-                    sequence=boundary.sequence,
-                    source=boundary.source,
-                )
-                dr.extend(
-                    _extract_reflection_boundaries_from_point(
-                        seed.point,
-                        geom,
-                        tx_id,
-                        sequence_prefix=seed.sequence,
+                    diffraction_boundaries, diffraction_children = _extract_diffraction_successors(state, geom, tx_id)
+                    interaction_boundaries.extend(diffraction_boundaries)
+
+                    if depth < max_interactions:
+                        next_frontier.extend(diffraction_children)
+
+                for child_state in next_frontier:
+                    interaction_boundaries.extend(
+                        _extract_state_visibility_boundaries(child_state, geom, tx_id)
                     )
-                )
+
+                frontier = next_frontier
 
         boundaries.extend(
             merge_and_label_boundaries(
                 los,
-                reflection,
-                diffraction,
-                rr,
-                rd,
-                dr,
+                interaction_boundaries,
                 epsilon=geom.epsilon,
             )
         )
