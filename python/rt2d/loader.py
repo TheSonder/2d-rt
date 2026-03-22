@@ -3,8 +3,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-import torch
-
 _LOADED = False
 _LIB_BASENAMES = [
     "rt2d_torch.dll",
@@ -36,6 +34,8 @@ def load_library(path: str | os.PathLike[str] | None = None) -> None:
     if _LOADED:
         return
 
+    import torch
+
     if path is not None:
         torch.ops.load_library(str(path))
         _LOADED = True
@@ -57,4 +57,3 @@ def load_library(path: str | os.PathLike[str] | None = None) -> None:
         "Could not find rt2d_torch shared library. Build with CMake and install to python/rt2d "
         "or set RT2D_TORCH_LIB to the compiled library path."
     )
-
