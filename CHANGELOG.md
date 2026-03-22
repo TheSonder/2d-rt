@@ -6,6 +6,7 @@
 - 新增 `python/rt2d/boundary.py`，实现几何展开、轻量拓扑、Uniform Grid 空间索引、LoS/Reflection/Diffraction 边界提取、边界合并和场景级 JSON 导出。
 - 新增 `rt2d.extract_scene_boundaries(...)`、`build_geometry(...)`、`compute_visible_subsegments(...)` 等 Python 接口，并在 `python/rt2d/__init__.py` 中导出。
 - 新增 `python/examples/extract_boundaries.py`，支持按 `scene_id` 抽取并导出边界 JSON。
+- 新增 `python/examples/visualize_boundaries.py`，支持将建筑、TX 与 `los/reflection/diffraction/mixed` 边界叠加导出为 PNG。
 - 新增 `tests/test_boundaries.py`，覆盖单矩形、半遮挡反射面、`scene 0/1` 结构化导出。
 - 调整 `python/rt2d/__init__.py` 与 `python/rt2d/loader.py`，将 `torch` 改为惰性导入，使纯几何边界提取不再依赖导入时就存在 PyTorch。
 
