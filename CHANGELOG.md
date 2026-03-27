@@ -5,21 +5,24 @@
 ### Changed
 - 清理并重写 `CHANGELOG.md`，将原有乱码内容统一整理为中文 UTF-8 文本。
 - 清理并重写 `README.md`，将项目说明同步到当前真实能力，并统一为中文 UTF-8 文本。
-- 收缩边界提取主流程，移除绕射链路，只保留 `LoS / Reflection / RR` 以及反射管内的遮挡区域边界。
+- 收缩边界提取主流程，移除绕射链路，只保留反射链路与反射管内的遮挡区域边界。
 - 调整 `extract_scene_boundaries(...)`、示例脚本、测试和导出说明，使仓库对外语义统一为“只支持反射边界”。
 - 为 `extract_scene_boundaries(...)` 新增 `tx_id` 范围校验，非法索引现在直接报 `ValueError`。
 - 调整边界去重键，将 `role` 纳入判定，避免几何重合但语义不同的边界被错误合并。
+- 将 `max_interactions` 的上限从 `2` 扩展到 `4`，允许主流程展开到四阶反射。
+- 新增四阶反射相关测试和文档说明。
 
 ### Breaking
 - `extract_scene_boundaries(...)` 不再支持绕射输出，也不再接受 `include_diffraction` 参数。
 - `rt2d` 不再导出 `extract_diffraction_events(...)`。
 - `python/examples/extract_boundaries.py` 和 `python/examples/visualize_boundaries.py` 不再提供 `--with-diffraction` 开关。
-- 边界输出现在只保留 `los / reflection` 两类 `type`，以及 `L / R / RR` 序列。
+- 边界输出现在只保留 `los / reflection` 两类 `type`，以及 `L / R / RR / RRR / RRRR` 序列。
 
 ### Migration
 - 如果旧代码传入了 `include_diffraction=True`，请直接删除该参数。
 - 如果旧代码依赖 `D / RD / DR` 或 `diffraction_edge`，需要改为只消费 `reflection_face` 和 `reflection_shadow`。
 - 如果旧脚本使用了 `--with-diffraction`，请直接删除该命令行参数。
+- 如需三阶或四阶反射，直接把 `max_interactions` 提高到 `3` 或 `4`。
 
 ## 2026-03-22
 
@@ -32,9 +35,8 @@
 - 新增 `tests/test_boundaries.py`，覆盖单矩形、半遮挡反射、场景 `0 / 1` 结构化导出等测试。
 - 调整边界延长逻辑：`LoS` 和 `Reflection` 的终点现在优先停在首个环境碰撞点，否则才落到场景外边界，不再直接穿过后续建筑。
 - 调整边界起射过滤逻辑：如果边界从顶点或边界点出发后立刻进入源建筑内部，则直接丢弃，不再输出穿入建筑体的伪边界。
-- 新增 `max_interactions` 配置，当前支持 `0 / 1 / 2` 阶交互展开。
-- 新增 `sequence` 输出字段，使用 `L / R / RR` 标记边界来源序列。
-- 新增二阶边界展开，当前实现 `RR`。
+- 新增 `max_interactions` 配置，当前支持高阶反射展开。
+- 新增 `sequence` 输出字段，使用 `L / R / RR / RRR / RRRR` 标记边界来源序列。
 - 将边界生成主流程重构为基于“射线管状态机”的递推过程：每次交互形成新的 `TubeState`，后续目标边或点先经过当前射线管裁剪，再做可见性与镜像判定。
 - 为非根 `TubeState` 新增“状态可见性边界”提取；当反射射线管内部被后续建筑遮挡时，现在会输出对应的同序列阴影边界。
 - 将 `LoS` 也纳入统一的 `TubeState` 可见性边界流程，根状态下的视距边界与反射态共用同一套生成逻辑。
@@ -56,7 +58,6 @@
 - `LoS / Reflection` 边界的 `p1` 语义从“扩展到场景包围盒”改为“扩展到首个环境碰撞或场景外边界”。
 - `LoS / Reflection` 现在会过滤掉从源建筑边界点出发但立刻进入该建筑内部的无效边界。
 - 边界 JSON 新增 `sequence` 和 `role` 字段；如果下游直接按旧 key 集合校验，需要同步更新。
-- `extract_scene_boundaries(..., max_interactions=...)` 当前对 `max_interactions > 2` 直接报错，不再静默退化。
 - `python/examples/visualize_boundaries.py` 新增 `aligned` 导出模式；该模式使用图像坐标系并翻转 `y` 轴，输出不再带标题、坐标轴、网格和边距。
 - `aligned` 模式的内部渲染方式改为像素栅格绘制；如果之前依赖 matplotlib 的矢量抗锯齿外观，视觉效果会变化，但几何落位更接近 RadioMapSeer。
 - `aligned` 模式的像素坐标语义调整为像素中心落位；如果之前基于旧 `-0.5` 偏移生成对比图，需要重新导出。
@@ -69,7 +70,7 @@
 - 如需复用中间几何结果，调用 `rt2d.build_geometry(scene)` 和 `rt2d.compute_visible_subsegments(tx, edge, geom)`。
 - 如果下游逻辑依赖旧的超长边界线段，需要改为使用新的 `p1` 语义；它现在表示真实的碰撞终止点或出界点。
 - 如果下游逻辑曾依赖穿入建筑内部的伪边界，需要按新的过滤规则重新消费结果。
-- 如需对齐一阶或二阶交互，显式传入 `max_interactions=0 / 1 / 2`。
+- 如需高阶反射，显式传入 `max_interactions=0 / 1 / 2 / 3 / 4`。
 - 如需区分反射面本身的边界与反射射线管内的阴影边界，读取新增的 `role` 字段。
 - 如需与 RadioMapSeer 的 `256x256` PNG 对齐，使用 `python/examples/visualize_boundaries.py --mode aligned --canvas-size 256`；如需叠到底图上，额外传入 `--radiomap-png <path>`。
 - 如需验证像素级对齐，优先使用最新的 `aligned` 导出；当前版本已改为按像素中心映射，而不是旧的半像素左上偏移。

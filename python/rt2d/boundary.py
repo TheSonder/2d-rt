@@ -1179,8 +1179,8 @@ def extract_scene_boundaries(
 ) -> dict[str, Any]:
     if max_interactions < 0:
         raise ValueError("max_interactions must be >= 0.")
-    if max_interactions > 2:
-        raise NotImplementedError("max_interactions > 2 is not implemented yet.")
+    if max_interactions > 4:
+        raise NotImplementedError("max_interactions > 4 is not implemented yet.")
 
     if isinstance(scene, dict):
         scene_data = scene

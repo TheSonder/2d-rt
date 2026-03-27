@@ -152,6 +152,14 @@ class BoundaryExtractionTests(unittest.TestCase):
         self.assertTrue({"L", "R", "RR"}.issubset(seq_two))
         self.assertFalse(any("D" in sequence for sequence in seq_two))
 
+    def test_max_interactions_four_accepts_higher_order_reflection_expansion(self) -> None:
+        payload = rt2d.extract_scene_boundaries("0", tx_ids=[0], max_interactions=4)
+        sequences = {item["sequence"] for item in payload["boundaries"]}
+
+        self.assertIn("RR", sequences)
+        self.assertTrue(all(set(sequence) <= {"L", "R"} for sequence in sequences))
+        self.assertLessEqual(max(len(sequence) for sequence in sequences), 4)
+
     def test_invalid_tx_id_raises_value_error(self) -> None:
         scene = {
             "scene_id": "invalid-tx",
@@ -176,5 +184,6 @@ class BoundaryExtractionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
