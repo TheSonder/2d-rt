@@ -22,8 +22,6 @@ import rt2d
 TYPE_STYLES = {
     "los": {"color": "#0B6E4F", "linewidth": 1.2, "alpha": 0.85, "label": "LoS"},
     "reflection": {"color": "#C84C09", "linewidth": 1.0, "alpha": 0.75, "label": "Reflection"},
-    "diffraction": {"color": "#1D4ED8", "linewidth": 0.0, "alpha": 0.95, "label": "Diffraction"},
-    "mixed": {"color": "#7C3AED", "linewidth": 1.4, "alpha": 0.9, "label": "Mixed"},
 }
 
 ROLE_STYLE_OVERRIDES = {
@@ -91,8 +89,6 @@ def _build_legend(ax: plt.Axes, counts: dict[str, int]) -> None:
         "los": TYPE_STYLES["los"],
         "reflection_face": ROLE_STYLE_OVERRIDES["reflection_face"],
         "reflection_shadow": ROLE_STYLE_OVERRIDES["reflection_shadow"],
-        "diffraction": TYPE_STYLES["diffraction"],
-        "mixed": TYPE_STYLES["mixed"],
     }
     for boundary_type, style in ordered_styles.items():
         count = counts.get(boundary_type, 0)
@@ -236,7 +232,7 @@ def _render_aligned_image(
         width = max(1, int(round(float(style.get("linewidth", 1.0)))))
 
         if abs(p0[0] - p1[0]) < 1.0e-9 and abs(p0[1] - p1[1]) < 1.0e-9:
-            radius = 1 if boundary_type == "diffraction" else 2
+            radius = 2
             draw.ellipse((p0[0] - radius, p0[1] - radius, p0[0] + radius, p0[1] + radius), fill=color)
             continue
 
@@ -350,11 +346,6 @@ def main() -> None:
         default=None,
         help="Optional RadioMapSeer PNG used as image-aligned background.",
     )
-    parser.add_argument(
-        "--with-diffraction",
-        action="store_true",
-        help="Enable diffraction expansion when extracting boundaries on the fly. Disabled by default.",
-    )
     args = parser.parse_args()
 
     output = args.output or Path("build") / f"scene_{args.scene_id}_boundaries.png"
@@ -365,7 +356,6 @@ def main() -> None:
             scene,
             tx_ids=args.tx_ids,
             max_interactions=args.max_interactions,
-            include_diffraction=args.with_diffraction,
         )
     else:
         payload = json.loads(args.boundary_json.read_text(encoding="utf-8"))

@@ -731,21 +731,17 @@ def _boundary_type_for_sequence(sequence: str) -> str:
         return "los"
     if not sequence:
         raise ValueError("sequence must not be empty.")
-
-    kinds = set(sequence)
-    if kinds == {"R"}:
+    if set(sequence) == {"R"}:
         return "reflection"
-    if kinds == {"D"}:
-        return "diffraction"
-    return "mixed"
+    raise ValueError(f"unsupported sequence: {sequence}")
 
 
 def _mechanism_for_sequence(sequence: str) -> str:
     if sequence == "L":
         return "los"
-
-    labels = {"R": "reflection", "D": "diffraction"}
-    return "+".join(labels[item] for item in sequence)
+    if set(sequence) == {"R"}:
+        return "+".join("reflection" for _ in sequence)
+    raise ValueError(f"unsupported sequence: {sequence}")
 
 
 def _angle_of(point: Point, apex: Point) -> float:
@@ -1086,55 +1082,6 @@ def _extract_reflection_successors(
     return (boundaries, children)
 
 
-def _extract_diffraction_successors(
-    state: TubeState,
-    geom: GeometryIndex,
-    tx_id: int,
-) -> tuple[list[BoundaryRecord], list[TubeState]]:
-    boundaries: list[BoundaryRecord] = []
-    children: list[TubeState] = []
-    sequence = f"{state.sequence}D" if state.sequence else "D"
-
-    for vertex in geom.vertices:
-        if not _point_in_tube(state, vertex.point, geom.epsilon):
-            continue
-        if not _is_vertex_critical(state.source_point, vertex, geom):
-            continue
-
-        direction = _sub(vertex.point, state.source_point)
-        if not _has_outward_departure(vertex.point, direction, vertex.poly_id, geom):
-            continue
-        p1, _ = _trace_to_first_collision(vertex.point, direction, geom)
-        boundaries.append(
-            _make_boundary_record(
-                sequence=sequence,
-                p0=vertex.point,
-                p1=p1,
-                source={
-                    "poly_id": vertex.poly_id,
-                    "edge_id": None,
-                    "vertex_id": vertex.vertex_id,
-                },
-                scene_id=geom.scene_id,
-                tx_id=tx_id,
-                role="diffraction_edge",
-            )
-        )
-        children.append(
-            _make_tube_state(
-                sequence,
-                vertex.point,
-                None,
-                exclude_edge_ids=(
-                    vertex.prev_edge_id,
-                    vertex.next_edge_id,
-                ),
-            )
-        )
-
-    return (boundaries, children)
-
-
 def extract_los_boundaries(tx: Point, geom: GeometryIndex, tx_id: int = 0) -> list[BoundaryRecord]:
     state = _make_tube_state("L", tx, None)
     return _extract_state_visibility_boundaries(state, geom, tx_id)
@@ -1147,16 +1094,6 @@ def extract_reflection_boundaries(
 ) -> list[BoundaryRecord]:
     state = _make_tube_state("", tx, None)
     boundaries, _ = _extract_reflection_successors(state, geom, tx_id)
-    return boundaries
-
-
-def extract_diffraction_events(
-    tx: Point,
-    geom: GeometryIndex,
-    tx_id: int = 0,
-) -> list[BoundaryRecord]:
-    state = _make_tube_state("", tx, None)
-    boundaries, _ = _extract_diffraction_successors(state, geom, tx_id)
     return boundaries
 
 
@@ -1174,6 +1111,7 @@ def _segment_key(boundary: BoundaryRecord, eps: float) -> tuple[Any, ...]:
         boundary.source.get("poly_id"),
         boundary.source.get("edge_id"),
         boundary.source.get("vertex_id"),
+        boundary.role,
     )
 
 
@@ -1236,7 +1174,6 @@ def extract_scene_boundaries(
     tx_ids: list[int] | None = None,
     root_dir: str | None = None,
     max_interactions: int = 1,
-    include_diffraction: bool = False,
     epsilon: float = 1.0e-6,
     output_path: str | Path | None = None,
 ) -> dict[str, Any]:
@@ -1252,6 +1189,10 @@ def extract_scene_boundaries(
 
     geom = build_geometry(scene_data, epsilon=epsilon)
     indices = tx_ids if tx_ids is not None else list(range(len(scene_data["antenna"])))
+    antenna_count = len(geom.antennas)
+    for tx_id in indices:
+        if tx_id < 0 or tx_id >= antenna_count:
+            raise ValueError(f"tx_id out of range: {tx_id}. Valid range: 0..{antenna_count - 1}")
 
     boundaries: list[BoundaryRecord] = []
     for tx_id in indices:
@@ -1268,15 +1209,6 @@ def extract_scene_boundaries(
                     reflection_boundaries, reflection_children = _extract_reflection_successors(state, geom, tx_id)
                     interaction_boundaries.extend(reflection_boundaries)
                     next_frontier.extend(reflection_children)
-
-                    if not include_diffraction or state.sequence.endswith("D"):
-                        continue
-
-                    diffraction_boundaries, diffraction_children = _extract_diffraction_successors(state, geom, tx_id)
-                    interaction_boundaries.extend(diffraction_boundaries)
-
-                    if depth < max_interactions:
-                        next_frontier.extend(diffraction_children)
 
                 for child_state in next_frontier:
                     interaction_boundaries.extend(

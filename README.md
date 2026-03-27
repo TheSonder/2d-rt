@@ -1,10 +1,11 @@
-# 2D-RT
+﻿# 2D-RT
 
 `2D-RT` 是一个面向 2D 场景传播边界提取的工程，当前主能力不是通用 ray tracing demo，而是：
 
 - 从场景 JSON 加载建筑轮廓与发射机位置
 - 构建 2D 几何索引与可见性判断
-- 提取 `LoS / Reflection / Diffraction / RR / RD / DR` 等传播边界
+- 提取 `LoS / Reflection / RR` 等传播边界
+- 输出反射面边界与反射管内的遮挡区域边界
 - 导出结构化边界 JSON
 - 生成用于人工检查的可视化 PNG
 - 保留一个基于 PyTorch 自定义算子的 C/C++/CUDA `raytrace` 示例能力
@@ -20,8 +21,8 @@ Python 包 `rt2d` 当前已经实现以下能力：
 - `extract_scene_boundaries(...)`
   - 按场景和 TX 提取传播边界
   - 支持 `max_interactions=0/1/2`
-  - 默认输出 `LoS / Reflection / RR`
-  - 传入 `include_diffraction=True` 后额外输出 `Diffraction / RD / DR`
+  - 输出 `LoS / Reflection / RR`
+  - 保留反射面边界和反射管内的遮挡区域边界
 - `build_geometry(...)`
   - 将场景预处理成可复用几何索引
 - `compute_visible_subsegments(...)`
@@ -31,12 +32,12 @@ Python 包 `rt2d` 当前已经实现以下能力：
 
 当前边界输出中包含：
 
-- `type`: `los` / `reflection` / `diffraction` / `mixed`
+- `type`: `los` / `reflection`
 - `p0`, `p1`: 边界起止点
 - `source`: 来源建筑、边或顶点
 - `mechanism`: 传播机制描述
-- `sequence`: 例如 `L`、`R`、`D`、`RR`、`RD`、`DR`
-- `role`: 例如 `visibility`、`reflection_face`、`reflection_shadow`、`diffraction_edge`
+- `sequence`: 例如 `L`、`R`、`RR`
+- `role`: 例如 `visibility`、`reflection_face`、`reflection_shadow`
 - `scene_id`, `tx_id`
 
 ### 2. 可视化
@@ -208,7 +209,6 @@ payload = rt2d.extract_scene_boundaries(
     "0",
     tx_ids=[0],
     max_interactions=2,
-    include_diffraction=True,
 )
 
 print(payload["scene_id"])
@@ -264,12 +264,6 @@ $env:PYTHONPATH = "$PWD\python"
 python .\python\examples\extract_boundaries.py 0 --tx-id 0 --max-interactions 2 --output .\build\scene_0.json
 ```
 
-启用绕射：
-
-```powershell
-python .\python\examples\extract_boundaries.py 0 --tx-id 0 --max-interactions 2 --with-diffraction
-```
-
 ### 2. 可视化边界
 
 常规展示图：
@@ -323,9 +317,8 @@ distances = rt2d.raytrace(origins, directions, sphere_center, sphere_radius=1.0)
 
 - `max_interactions` 仅支持 `0 / 1 / 2`
 - `max_interactions > 2` 会直接报错
-- 二阶组合当前实现到 `RR / RD / DR`
-- `DD` 和三阶及以上组合尚未实现
-- 默认关闭绕射扩展，避免结果过于密集
+- 二阶组合当前只实现到 `RR`
+- 当前不再生成绕射边界
 
 ## 测试
 
@@ -339,7 +332,7 @@ distances = rt2d.raytrace(origins, directions, sphere_center, sphere_radius=1.0)
 - 部分遮挡下的可见子段裁剪
 - LoS / Reflection 边界在后续建筑处停止
 - 反射管内的 shadow boundary 输出
-- `max_interactions=2` 下的 `RR / RD / DR`
+- `max_interactions=2` 下的 `RR`
 - 场景 `0 / 1` 的 JSON 导出结构
 
 ## 设计说明

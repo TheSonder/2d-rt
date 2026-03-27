@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import math
 import sys
@@ -36,25 +36,7 @@ class BoundaryExtractionTests(unittest.TestCase):
         self.assertTrue(any(_approx_point(item["p0"], (4.0, 0.0)) for item in reflection))
         self.assertTrue(all(item["sequence"] == "L" for item in los))
         self.assertTrue(all(item["sequence"] == "R" for item in reflection))
-        self.assertFalse(any(item["type"] == "diffraction" for item in payload["boundaries"]))
 
-    def test_diffraction_is_available_when_explicitly_enabled(self) -> None:
-        scene = {
-            "scene_id": "unit-rect-diffraction",
-            "antenna": [[2.0, -2.0]],
-            "polygons": [[[0.0, 0.0], [4.0, 0.0], [4.0, 2.0], [0.0, 2.0], [0.0, 0.0]]],
-        }
-
-        payload = rt2d.extract_scene_boundaries(
-            scene,
-            tx_ids=[0],
-            max_interactions=1,
-            include_diffraction=True,
-        )
-        diffraction = [item for item in payload["boundaries"] if item["type"] == "diffraction"]
-
-        self.assertGreaterEqual(len(diffraction), 2)
-        self.assertTrue(all(item["sequence"] == "D" for item in diffraction))
 
     def test_partial_occlusion_clips_visible_subsegment(self) -> None:
         scene = {
@@ -150,7 +132,7 @@ class BoundaryExtractionTests(unittest.TestCase):
         los = [item for item in payload["boundaries"] if item["type"] == "los"]
         self.assertFalse(any(_approx_point(item["p0"], (0.0, 2.0)) for item in los))
 
-    def test_max_interactions_two_without_diffraction_only_adds_rr(self) -> None:
+    def test_max_interactions_two_only_adds_rr(self) -> None:
         scene = {
             "scene_id": "two-hop",
             "antenna": [[2.0, -2.0]],
@@ -168,27 +150,17 @@ class BoundaryExtractionTests(unittest.TestCase):
         payload_two = rt2d.extract_scene_boundaries(scene, tx_ids=[0], max_interactions=2)
         seq_two = {item["sequence"] for item in payload_two["boundaries"]}
         self.assertTrue({"L", "R", "RR"}.issubset(seq_two))
-        self.assertFalse({"D", "RD", "DR"} & seq_two)
+        self.assertFalse(any("D" in sequence for sequence in seq_two))
 
-    def test_max_interactions_two_with_diffraction_adds_rd_and_dr(self) -> None:
+    def test_invalid_tx_id_raises_value_error(self) -> None:
         scene = {
-            "scene_id": "two-hop-diffraction",
+            "scene_id": "invalid-tx",
             "antenna": [[2.0, -2.0]],
-            "polygons": [
-                [[0.0, 0.0], [4.0, 0.0], [4.0, 2.0], [0.0, 2.0], [0.0, 0.0]],
-                [[5.0, -1.0], [6.0, -1.0], [6.0, 3.0], [5.0, 3.0], [5.0, -1.0]],
-                [[8.0, 0.0], [10.0, 0.0], [10.0, 3.0], [8.0, 3.0], [8.0, 0.0]],
-            ],
+            "polygons": [[[0.0, 0.0], [4.0, 0.0], [4.0, 2.0], [0.0, 2.0], [0.0, 0.0]]],
         }
 
-        payload = rt2d.extract_scene_boundaries(
-            scene,
-            tx_ids=[0],
-            max_interactions=2,
-            include_diffraction=True,
-        )
-        sequences = {item["sequence"] for item in payload["boundaries"]}
-        self.assertTrue({"D", "RR", "RD", "DR"}.issubset(sequences))
+        with self.assertRaises(ValueError):
+            rt2d.extract_scene_boundaries(scene, tx_ids=[-1], max_interactions=1)
 
     def test_scene_zero_and_one_export_json(self) -> None:
         for scene_id in ("0", "1"):
@@ -204,3 +176,5 @@ class BoundaryExtractionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
