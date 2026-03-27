@@ -1236,6 +1236,7 @@ def extract_scene_boundaries(
     tx_ids: list[int] | None = None,
     root_dir: str | None = None,
     max_interactions: int = 1,
+    include_diffraction: bool = False,
     epsilon: float = 1.0e-6,
     output_path: str | Path | None = None,
 ) -> dict[str, Any]:
@@ -1268,7 +1269,7 @@ def extract_scene_boundaries(
                     interaction_boundaries.extend(reflection_boundaries)
                     next_frontier.extend(reflection_children)
 
-                    if state.sequence.endswith("D"):
+                    if not include_diffraction or state.sequence.endswith("D"):
                         continue
 
                     diffraction_boundaries, diffraction_children = _extract_diffraction_successors(state, geom, tx_id)

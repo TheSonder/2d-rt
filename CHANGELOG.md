@@ -1,5 +1,20 @@
 # CHANGELOG
 
+## 2026-03-27
+
+### Changed
+- 重写 `README.md`，按当前项目真实能力重新整理项目定位、目录结构、场景数据格式、边界提取 API、可视化脚本、原生扩展构建方式和使用示例。
+- 明确区分仓库的两条能力线：Python 侧的 2D 传播边界提取主线，以及 C/C++/CUDA + Torch 自定义算子实验线。
+- 补充 `extract_scene_boundaries(...)`、`build_geometry(...)`、`compute_visible_subsegments(...)`、`extract_boundaries.py`、`visualize_boundaries.py`、`demo.py` 的 README 使用说明。
+- 补充 `pretty / aligned / aligned-geometry` 三种可视化模式说明，以及 `max_interactions`、`include_diffraction` 的当前行为说明。
+
+### Breaking
+- 无兼容性影响。
+
+### Migration
+- 无需修改现有调用代码。
+- 如需了解当前推荐用法，请以新的 `README.md` 为准，不再参考旧的 “sphere raytrace starter project” 描述。
+
 ## 2026-03-22
 
 ### Changed
@@ -29,6 +44,9 @@
 - 修正 `aligned` 模式的比例尺：移除误加入的 `+5` 像素硬偏移，并禁止场外延长边界参与对齐范围缩放，避免底图与边界出现“比例尺不一致”。
 - 调整 `python/examples/visualize_boundaries.py` 的出图策略：不再绘制任何 TX 标记，且按 `tx_id` 单独输出 PNG，一张图只保留对应发射机的边界结果。
 - 新增 `visualize_boundaries.py --mode aligned-geometry`，输出与 RadioMapSeer 图像网格同坐标的“仅建筑物 + 边界线”单张 PNG，不叠加 radio map 底图。
+- 调整边界提取默认机制：`extract_scene_boundaries(...)` 现在默认关闭绕射扩展，仅保留 `LoS / Reflection / RR`；如需 `D / RD / DR`，必须显式传入 `include_diffraction=True` 或在示例脚本里使用 `--with-diffraction`。
+- 调整 [python/examples/extract_boundaries.py](/d:/TheSonder/0.5%20Code/Python/2d-rt/python/examples/extract_boundaries.py) 和 [python/examples/visualize_boundaries.py](/d:/TheSonder/0.5%20Code/Python/2d-rt/python/examples/visualize_boundaries.py)，新增 `--with-diffraction` 命令行开关，默认关闭绕射以降低高阶结果复杂度。
+- 调整可视化样式：将紫色 `reflection_shadow` 线宽从 `2.0` 收窄到 `1.0`，减少对齐图中遮挡边界的视觉压迫感。
 
 ### Breaking
 - `rt2d` 现在默认暴露边界提取相关新接口；`raytrace` 仍保留原调用方式，但 `torch` 不再在包导入阶段立即加载。
@@ -43,6 +61,8 @@
 - `aligned` 模式不再让场外延长边界改变对齐 extent；如果你之前依赖“整条延长边界都完整显示”，现在会改为优先保持和 RadioMapSeer 底图同尺度。
 - `visualize_boundaries.py` 默认从“多 TX 合成一张图”改为“每个 TX 一张图”；如果你之前依赖单文件汇总图，需要改用多个输出文件或显式传入单个 `--tx-id`。
 - `visualize_boundaries.py` 新增 `aligned-geometry` 模式；如果你之前依赖“不给底图路径时由 `aligned` 隐式生成几何图”，现在建议显式切到新模式。
+- `extract_scene_boundaries(...)` 的默认机制集合发生变化：默认不再输出 `diffraction / RD / DR`；如果你之前默认依赖这些边界，需要显式打开绕射。
+- 可视化里的紫色阴影边界显示会比之前更细；无接口兼容性影响。
 - 无额外兼容性影响。
 
 ### Migration
@@ -59,5 +79,7 @@
 - 若要与 RadioMapSeer 底图严格同尺度，使用最新的 `aligned` 导出；该模式现在以场景网格为准，不再把场外延长边界算进缩放范围。
 - 如需只导出单个发射机，继续传 `--tx-id <id>`；如不传，则脚本会按 payload 中的每个 `tx_id` 自动生成带 `_tx{id}` 后缀的多张 PNG。
 - 如需导出和原图同尺寸、同坐标、但只包含建筑与边界线的图，使用 `python/examples/visualize_boundaries.py --mode aligned-geometry`。
+- 如需恢复旧的包含绕射的结果，调用 `rt2d.extract_scene_boundaries(..., include_diffraction=True)`，或在示例脚本后追加 `--with-diffraction`。
+- 如需导出更轻量的紫色阴影边界展示，直接使用当前版本的可视化脚本，无需额外参数。
 - 既有 `rt2d.raytrace(...)` 调用无需修改；如果上层代码依赖“导入 `rt2d` 时必须立即失败于缺少 PyTorch”，需要改为在调用 `raytrace` 或 `load_library` 时处理该错误。
 

@@ -39,12 +39,18 @@ def main() -> None:
         default=1,
         help="Maximum environment interactions to expand. Supported: 0, 1, 2.",
     )
+    parser.add_argument(
+        "--with-diffraction",
+        action="store_true",
+        help="Enable diffraction expansion. Disabled by default to keep higher-order outputs compact.",
+    )
     args = parser.parse_args()
 
     payload = rt2d.extract_scene_boundaries(
         args.scene_id,
         tx_ids=args.tx_ids,
         max_interactions=args.max_interactions,
+        include_diffraction=args.with_diffraction,
         epsilon=args.epsilon,
         output_path=args.output,
     )

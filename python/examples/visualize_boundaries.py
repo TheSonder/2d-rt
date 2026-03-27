@@ -28,7 +28,7 @@ TYPE_STYLES = {
 
 ROLE_STYLE_OVERRIDES = {
     "reflection_face": {"color": "#C84C09", "linewidth": 1.0, "alpha": 0.8, "label": "Reflection Face"},
-    "reflection_shadow": {"color": "#6D28D9", "linewidth": 2.0, "alpha": 0.95, "label": "Reflection Shadow"},
+    "reflection_shadow": {"color": "#6D28D9", "linewidth": 1.0, "alpha": 0.95, "label": "Reflection Shadow"},
 }
 
 
@@ -350,6 +350,11 @@ def main() -> None:
         default=None,
         help="Optional RadioMapSeer PNG used as image-aligned background.",
     )
+    parser.add_argument(
+        "--with-diffraction",
+        action="store_true",
+        help="Enable diffraction expansion when extracting boundaries on the fly. Disabled by default.",
+    )
     args = parser.parse_args()
 
     output = args.output or Path("build") / f"scene_{args.scene_id}_boundaries.png"
@@ -360,6 +365,7 @@ def main() -> None:
             scene,
             tx_ids=args.tx_ids,
             max_interactions=args.max_interactions,
+            include_diffraction=args.with_diffraction,
         )
     else:
         payload = json.loads(args.boundary_json.read_text(encoding="utf-8"))
