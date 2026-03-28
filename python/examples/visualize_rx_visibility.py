@@ -41,6 +41,14 @@ INDEX_TO_STYLE = {
 }
 
 
+def _default_bounds(scene_id: str, requested_bounds: list[float] | None) -> tuple[float, float, float, float] | None:
+    if requested_bounds is not None:
+        return tuple(float(value) for value in requested_bounds)
+    if str(scene_id).isdigit():
+        return (0.0, 0.0, 255.0, 255.0)
+    return None
+
+
 def _grid_to_index_grid(grid: list[list[int]]) -> list[list[int]]:
     return [
         [LABEL_TO_INDEX.get(int(value), LABEL_TO_INDEX[-1]) for value in row]
@@ -267,6 +275,7 @@ def main() -> None:
         help="Disable diffraction states when computing on the fly.",
     )
     args = parser.parse_args()
+    bounds = _default_bounds(args.scene_id, args.bounds)
 
     output = args.output or Path("build") / f"scene_{args.scene_id}_rx_visibility.png"
     scene = rt2d.load_scene(args.scene_id)
@@ -277,7 +286,7 @@ def main() -> None:
             tx_ids=args.tx_ids,
             max_interactions=args.max_interactions,
             grid_step=args.grid_step,
-            bounds=tuple(args.bounds) if args.bounds is not None else None,
+            bounds=bounds,
             enable_reflection=not args.disable_reflection,
             enable_diffraction=not args.disable_diffraction,
         )

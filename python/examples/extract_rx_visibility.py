@@ -11,6 +11,14 @@ if str(PROJECT_PYTHON_ROOT) not in sys.path:
 import rt2d
 
 
+def _default_bounds(scene_id: str, requested_bounds: list[float] | None) -> tuple[float, float, float, float] | None:
+    if requested_bounds is not None:
+        return tuple(float(value) for value in requested_bounds)
+    if str(scene_id).isdigit():
+        return (0.0, 0.0, 255.0, 255.0)
+    return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Compute RX grid visibility orders for a 2D RT scene.")
     parser.add_argument("scene_id", help="Scene id under data/environment")
@@ -64,13 +72,14 @@ def main() -> None:
         help="Disable diffraction states.",
     )
     args = parser.parse_args()
+    bounds = _default_bounds(args.scene_id, args.bounds)
 
     payload = rt2d.compute_rx_visibility(
         args.scene_id,
         tx_ids=args.tx_ids,
         max_interactions=args.max_interactions,
         grid_step=args.grid_step,
-        bounds=tuple(args.bounds) if args.bounds is not None else None,
+        bounds=bounds,
         epsilon=args.epsilon,
         enable_reflection=not args.disable_reflection,
         enable_diffraction=not args.disable_diffraction,
