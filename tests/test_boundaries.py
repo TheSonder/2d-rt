@@ -119,6 +119,22 @@ class BoundaryExtractionTests(unittest.TestCase):
         self.assertTrue(any(_approx_point(item["p0"], (10.0, 6.0)) for item in occluder_boundaries))
         self.assertTrue(any(_approx_point(item["p0"], (14.0, 6.0)) for item in occluder_boundaries))
 
+    def test_los_outputs_shadow_boundaries_on_occluder(self) -> None:
+        scene = {
+            "scene_id": "los-shadow",
+            "antenna": [[2.0, 4.0]],
+            "polygons": [
+                [[0.0, 12.0], [12.0, 12.0], [12.0, 15.0], [0.0, 15.0], [0.0, 12.0]],
+                [[10.0, 6.0], [14.0, 6.0], [14.0, 8.0], [10.0, 8.0], [10.0, 6.0]],
+            ],
+        }
+
+        payload = rt2d.extract_scene_boundaries(scene, tx_ids=[0], max_interactions=0)
+        los_shadow = [item for item in payload["boundaries"] if item["role"] == "los_shadow"]
+
+        self.assertGreaterEqual(len(los_shadow), 2)
+        self.assertTrue(all(item["sequence"] == "L" for item in los_shadow))
+
     def test_interior_departure_vertex_is_filtered(self) -> None:
         scene = {
             "scene_id": "interior-departure",
@@ -184,6 +200,7 @@ class BoundaryExtractionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

@@ -25,6 +25,7 @@ TYPE_STYLES = {
 }
 
 ROLE_STYLE_OVERRIDES = {
+    "los_shadow": {"color": "#B91C1C", "linewidth": 1.0, "alpha": 0.95, "label": "LoS Shadow"},
     "reflection_face": {"color": "#C84C09", "linewidth": 1.0, "alpha": 0.8, "label": "Reflection Face"},
     "reflection_shadow": {"color": "#6D28D9", "linewidth": 1.0, "alpha": 0.95, "label": "Reflection Shadow"},
 }
@@ -87,6 +88,7 @@ def _build_legend(ax: plt.Axes, counts: dict[str, int]) -> None:
     labels = []
     ordered_styles = {
         "los": TYPE_STYLES["los"],
+        "los_shadow": ROLE_STYLE_OVERRIDES["los_shadow"],
         "reflection_face": ROLE_STYLE_OVERRIDES["reflection_face"],
         "reflection_shadow": ROLE_STYLE_OVERRIDES["reflection_shadow"],
     }

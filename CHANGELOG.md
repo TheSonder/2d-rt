@@ -1,5 +1,20 @@
 ﻿# CHANGELOG
 
+## 2026-03-28
+
+### Changed
+- 为 `LoS` 主流程新增 `los_shadow` 边界输出，使根状态下也能导出视距遮挡边界。
+- 调整可视化样式，新增 `los_shadow` 的渲染颜色与图例项。
+- 新增 `python/examples/generate_radiomapseer_los_dataset.py`，支持从 `RadioMapSeer` 数据目录批量生成 `LoS + LoS-shadow` 标签图。
+- 新增对应测试，校验 `max_interactions=0` 时可以输出 `los_shadow`。
+
+### Breaking
+- 无兼容性影响。
+
+### Migration
+- 如需生成仅包含视距与视距遮挡边界的标签图，调用 `python/examples/generate_radiomapseer_los_dataset.py`。
+- 如需在现有提取结果中区分视距遮挡边界，读取新增的 `role="los_shadow"`。
+
 ## 2026-03-27
 
 ### Changed
@@ -42,7 +57,7 @@
 - 将 `LoS` 也纳入统一的 `TubeState` 可见性边界流程，根状态下的视距边界与反射态共用同一套生成逻辑。
 - 调整反射态可见性判定：镜像源下的后续可见性会排除父反射建筑的全部边，避免父反射体错误遮挡反射射线管内部目标。
 - 调整反射态阴影轮廓提取：非根状态下优先使用可见顶点做轮廓极值，而不是仅用逐边子段端点，修正矩形遮挡物阴影顶点选择错误的问题。
-- 新增 `role` 输出字段，当前可区分 `visibility / reflection_face / reflection_shadow`，并在可视化中将 `reflection_shadow` 单独高亮显示。
+- 新增 `role` 输出字段，当前可区分 `visibility / reflection_face / reflection_shadow / los_shadow`，并在可视化中将阴影边界单独高亮显示。
 - 新增测试场景 `reflection_shadow_demo`，用于人工核对一阶反射与阴影边界。
 - 调整 `python/rt2d/__init__.py` 和 `python/rt2d/loader.py`，将 `torch` 改为惰性导入，使纯几何边界提取不再依赖导入时就存在 PyTorch。
 - 调整 `python/examples/visualize_boundaries.py`，新增 `--mode aligned`、`--canvas-size` 和 `--radiomap-png`，支持按 `256x256` 图像坐标导出无边框 PNG，并直接叠加到 RadioMapSeer 风格底图。

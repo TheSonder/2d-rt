@@ -897,48 +897,68 @@ def _extract_state_visibility_boundaries(
         return []
 
     if state.sequence == "L":
-        boundaries: list[BoundaryRecord] = []
-        critical_vertices = {
-            vertex.vertex_id
-            for vertex in geom.vertices
-            if _point_in_tube(state, vertex.point, geom.epsilon)
-            and _is_vertex_critical(state.source_point, vertex, geom)
-        }
-
-        for edge in geom.edges:
-            if edge.edge_id in state.exclude_edge_ids:
-                continue
-
-            visible_subsegments = _compute_visible_subsegments_for_state(state, edge, geom)
-            if not visible_subsegments:
-                continue
-
-            for start, end in visible_subsegments:
-                for t in (start, end):
-                    source = _source_for_edge_point(edge, t, geom)
-                    vertex_id = source["vertex_id"]
-                    if vertex_id is not None and vertex_id not in critical_vertices:
-                        continue
-
-                    p0 = _lerp(edge.a, edge.b, t)
-                    direction = _sub(p0, state.source_point)
-                    if not _has_outward_departure(p0, direction, edge.poly_id, geom):
-                        continue
-                    p1, _ = _trace_to_first_collision(p0, direction, geom)
-                    boundaries.append(
-                        _make_boundary_record(
-                            sequence=state.sequence,
-                            p0=p0,
-                            p1=p1,
-                            source=source,
-                            scene_id=geom.scene_id,
-                            tx_id=tx_id,
-                            role="visibility" if state.sequence == "L" else "reflection_shadow",
-                        )
-                    )
-
+        boundaries = _extract_root_visibility_boundaries(state, geom, tx_id)
+        boundaries.extend(_extract_polygon_shadow_boundaries(state, geom, tx_id, role="los_shadow"))
         return boundaries
 
+    return _extract_polygon_shadow_boundaries(state, geom, tx_id, role="reflection_shadow")
+
+
+def _extract_root_visibility_boundaries(
+    state: TubeState,
+    geom: GeometryIndex,
+    tx_id: int,
+) -> list[BoundaryRecord]:
+    boundaries: list[BoundaryRecord] = []
+    critical_vertices = {
+        vertex.vertex_id
+        for vertex in geom.vertices
+        if _point_in_tube(state, vertex.point, geom.epsilon)
+        and _is_vertex_critical(state.source_point, vertex, geom)
+    }
+
+    for edge in geom.edges:
+        if edge.edge_id in state.exclude_edge_ids:
+            continue
+
+        visible_subsegments = _compute_visible_subsegments_for_state(state, edge, geom)
+        if not visible_subsegments:
+            continue
+
+        for start, end in visible_subsegments:
+            for t in (start, end):
+                source = _source_for_edge_point(edge, t, geom)
+                vertex_id = source["vertex_id"]
+                if vertex_id is not None and vertex_id not in critical_vertices:
+                    continue
+
+                p0 = _lerp(edge.a, edge.b, t)
+                direction = _sub(p0, state.source_point)
+                if not _has_outward_departure(p0, direction, edge.poly_id, geom):
+                    continue
+                p1, _ = _trace_to_first_collision(p0, direction, geom)
+                boundaries.append(
+                    _make_boundary_record(
+                        sequence=state.sequence,
+                        p0=p0,
+                        p1=p1,
+                        source=source,
+                        scene_id=geom.scene_id,
+                        tx_id=tx_id,
+                        role="visibility",
+                    )
+                )
+
+    return boundaries
+
+
+def _extract_polygon_shadow_boundaries(
+    state: TubeState,
+    geom: GeometryIndex,
+    tx_id: int,
+    *,
+    role: str,
+) -> list[BoundaryRecord]:
     boundaries: list[BoundaryRecord] = []
     polygon_points: dict[int, list[tuple[Point, dict[str, int | None], str]]] = {}
 
@@ -1020,7 +1040,7 @@ def _extract_state_visibility_boundaries(
                     source=source,
                     scene_id=geom.scene_id,
                     tx_id=tx_id,
-                    role="reflection_shadow",
+                    role=role,
                 )
             )
 
