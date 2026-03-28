@@ -6,14 +6,21 @@
 - 为 `LoS` 主流程新增 `los_shadow` 边界输出，使根状态下也能导出视距遮挡边界。
 - 调整可视化样式，新增 `los_shadow` 的渲染颜色与图例项。
 - 新增 `python/examples/generate_radiomapseer_los_dataset.py`，支持从 `RadioMapSeer` 数据目录批量生成 `LoS + LoS-shadow` 标签图，并与 `png/buildings_complete/{map_id}.png` 叠加输出。
-- 新增对应测试，校验 `max_interactions=0` 时可以输出 `los_shadow`。
+- 新增对应测试，校验 `max_interactions=0` 时可以输出 `los_shadow`。`r`n- 调整 `python/examples/generate_radiomapseer_physics_boundary_dataset.py`，新增 `--max-interactions` 参数，并支持渲染 `reflection_face / reflection_shadow`，可直接生成一阶反射数据集图像。
+- 新增 `rt2d.compute_rx_visibility(...)`，支持在 `xoy` 平面按 `1m` 栅格生成 `RX` 点，并按最小传播阶数输出 `LoS / 1阶 / 2阶 / 3阶 / 4阶` 可见性标签。
+- 新增 `python/rt2d/coverage.py`，实现基于传播状态展开的 `RX` 可见性求解，当前支持 `Reflection`、几何 `Diffraction` 以及 `RR / RD / DR / DD` 等混合高阶组合。
+- 新增 `python/examples/extract_rx_visibility.py`，支持按场景导出 `RX` 栅格可见性 JSON。
+- 新增 `tests/test_coverage.py`，覆盖空场景 LoS、一阶反射、一阶绕射、二阶反射和四阶上限支持。
 
 ### Breaking
 - 无兼容性影响。
 
 ### Migration
 - 如需生成与 `png/buildings_complete` 叠加后的视距与视距遮挡边界标签图，调用 `python/examples/generate_radiomapseer_los_dataset.py`。
-- 如需在现有提取结果中区分视距遮挡边界，读取新增的 `role="los_shadow"`。
+- 如需在现有提取结果中区分视距遮挡边界，读取新增的 `role="los_shadow"`。`r`n- 如需生成一阶反射版本，调用 `python/examples/generate_radiomapseer_physics_boundary_dataset.py --max-interactions 1 --output-dir ...\DPM1`。
+- 如需输出 `RX` 栅格的最小可达阶数，调用 `rt2d.compute_rx_visibility(scene_id_or_scene, tx_ids=..., max_interactions=..., grid_step=1.0, ...)`。
+- 如需命令行导出 `RX` 可见性结果，使用 `python .\\python\\examples\\extract_rx_visibility.py <scene_id> --max-interactions 4 --output .\\build\\rx_visibility.json`。
+- `visibility_order_grid` 采用行优先且 `y` 从大到小的布局，标签约定为：`-2=建筑内/边界`, `-1=不可达`, `0=LoS`, `1..4=最小交互阶数`。
 
 ## 2026-03-27
 
@@ -93,6 +100,7 @@
 - 如需只导出单个发射机，继续传 `--tx-id <id>`；如不传，脚本会按 payload 中的每个 `tx_id` 自动生成带 `_tx{id}` 后缀的多张 PNG。
 - 如需导出与原图同尺寸、同坐标、但只包含建筑与边界线的图，使用 `python/examples/visualize_boundaries.py --mode aligned-geometry`。
 - 既有 `rt2d.raytrace(...)` 调用无需修改；如果上层代码依赖“导入 `rt2d` 时必须立即因缺少 PyTorch 失败”，需要改为在调用 `raytrace` 或 `load_library` 时处理该错误。
+
 
 
 

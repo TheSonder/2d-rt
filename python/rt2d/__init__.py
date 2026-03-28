@@ -10,6 +10,7 @@ from .boundary import (
     is_visible,
     merge_and_label_boundaries,
 )
+from .coverage import compute_rx_visibility
 from .loader import load_library
 from .scene import load_scene
 
@@ -29,6 +30,7 @@ def raytrace(
 __all__ = [
     "build_geometry",
     "compute_visible_subsegments",
+    "compute_rx_visibility",
     "export_boundaries_json",
     "extract_los_boundaries",
     "extract_reflection_boundaries",

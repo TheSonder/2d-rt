@@ -15,6 +15,8 @@ import rt2d
 
 VISIBILITY_COLOR = (11, 110, 79, 255)
 LOS_SHADOW_COLOR = (185, 28, 28, 255)
+REFLECTION_FACE_COLOR = (200, 76, 9, 255)
+REFLECTION_SHADOW_COLOR = (109, 40, 217, 255)
 
 
 def _to_image_point(point: list[float] | tuple[float, float], image_height: int) -> tuple[int, int]:
@@ -64,6 +66,10 @@ def _overlay_boundaries(
             color = VISIBILITY_COLOR
         elif role == "los_shadow":
             color = LOS_SHADOW_COLOR
+        elif role == "reflection_face":
+            color = REFLECTION_FACE_COLOR
+        elif role == "reflection_shadow":
+            color = REFLECTION_SHADOW_COLOR
         else:
             continue
 
@@ -90,6 +96,12 @@ def main() -> None:
         type=Path,
         default=Path(r"D:\TheSonder\0.8 Resources\data\RadioMapSeer\physics_boundary\DPM"),
         help="Output directory for generated PNG files.",
+    )
+    parser.add_argument(
+        "--max-interactions",
+        type=int,
+        default=0,
+        help="Boundary interaction depth. Use 0 for LoS only, 1 for first-order reflections.",
     )
     parser.add_argument("--map-start", type=int, default=0, help="First map id to generate.")
     parser.add_argument("--map-end", type=int, default=19, help="Last map id to generate.")
@@ -119,7 +131,11 @@ def main() -> None:
             continue
 
         for tx_id in tx_ids:
-            payload = rt2d.extract_scene_boundaries(scene, tx_ids=[tx_id], max_interactions=0)
+            payload = rt2d.extract_scene_boundaries(
+                scene,
+                tx_ids=[tx_id],
+                max_interactions=args.max_interactions,
+            )
             output_path = args.output_dir / f"{map_id}_{tx_id}.png"
             _overlay_boundaries(base_image_path, payload["boundaries"], output_path)
             generated += 1
