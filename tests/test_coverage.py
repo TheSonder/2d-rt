@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python"))
 
 import rt2d
-from rt2d.coverage import build_layered_sequence_render_grid
+from rt2d.coverage import SequenceCostConfig, build_energy_pruned_sequence_render_grid, build_layered_sequence_render_grid
 
 
 def _label_at(payload: dict[str, object], tx_index: int, x: float, y: float) -> int:
@@ -62,6 +62,29 @@ class RxCoverageTests(unittest.TestCase):
 
         self.assertEqual(grid[0][0], "DD")
         self.assertEqual(counts["DD"], 1)
+
+    def test_energy_pruned_sequence_grid_can_drop_high_cost_dd(self) -> None:
+        outdoor_mask = [[True]]
+        sequence_hit_grids = {
+            "L": [[0]],
+            "DD": [[1]],
+        }
+        grid_meta = {
+            "min_x": 0.0,
+            "max_y": 200.0,
+            "step": 1.0,
+        }
+
+        grid, counts = build_energy_pruned_sequence_render_grid(
+            sequence_hit_grids,
+            outdoor_mask,
+            (0.0, 0.0),
+            grid_meta,
+            SequenceCostConfig(max_cost=50.0),
+        )
+
+        self.assertEqual(grid[0][0], "unreachable")
+        self.assertEqual(counts["unreachable"], 1)
 
     def test_empty_scene_marks_all_grid_points_as_los(self) -> None:
         scene = {

@@ -19,6 +19,7 @@ if str(PROJECT_PYTHON_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_PYTHON_ROOT))
 
 import rt2d
+from rt2d.coverage import SequenceCostConfig, build_energy_pruned_sequence_render_grid
 
 LABEL_TO_INDEX = {
     -2: 0,
@@ -318,7 +319,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--render-logic",
-        choices=("minimal-order", "layered-sequence"),
+        choices=("minimal-order", "layered-sequence", "energy-pruned-sequence"),
         default="minimal-order",
         help="Choose between the original minimal-order rendering and the new layered sequence rendering.",
     )
@@ -360,6 +361,7 @@ def main() -> None:
     )
     args = parser.parse_args()
     bounds = _default_bounds(args.scene_id, args.bounds)
+    needs_sequence_payload = args.render_logic in {"layered-sequence", "energy-pruned-sequence"}
 
     output = args.output or Path("build") / f"scene_{args.scene_id}_rx_visibility.png"
     scene = rt2d.load_scene(args.scene_id)
@@ -373,7 +375,8 @@ def main() -> None:
             bounds=bounds,
             enable_reflection=not args.disable_reflection,
             enable_diffraction=not args.disable_diffraction,
-            include_sequence_render_grid=args.render_logic == "layered-sequence",
+            include_sequence_render_grid=needs_sequence_payload,
+            include_sequence_hit_grids=args.render_logic == "energy-pruned-sequence",
         )
     else:
         payload = json.loads(args.rx_json.read_text(encoding="utf-8"))
@@ -389,6 +392,22 @@ def main() -> None:
                 "Selected render logic requires layered_sequence_grid in the payload. "
                 "Recompute on the fly without --rx-json or export a payload that includes layered sequence data."
             )
+        if args.render_logic == "energy-pruned-sequence":
+            if "sequence_hit_grids" not in tx_result:
+                raise ValueError(
+                    "Selected render logic requires sequence_hit_grids in the payload. "
+                    "Recompute on the fly without --rx-json or export a payload that includes sequence hit grids."
+                )
+            pruned_grid, pruned_counts = build_energy_pruned_sequence_render_grid(
+                tx_result["sequence_hit_grids"],
+                [[label != "blocked" for label in row] for row in tx_result["layered_sequence_grid"]],
+                _tx_point(scene, tx_id),
+                payload["grid"],
+                SequenceCostConfig(),
+            )
+            tx_result = dict(tx_result)
+            tx_result["layered_sequence_grid"] = pruned_grid
+            tx_result["layered_sequence_counts"] = pruned_counts
         tx_output = _resolve_output_path(output, str(payload["scene_id"]), tx_id, multiple_outputs)
         if args.mode == "aligned":
             _render_aligned(
@@ -398,7 +417,7 @@ def main() -> None:
                 payload["grid"],
                 tx_output,
                 max(args.scale, 1),
-                render_logic=args.render_logic,
+                render_logic="layered-sequence" if args.render_logic == "energy-pruned-sequence" else args.render_logic,
             )
         else:
             _render_pretty(
@@ -407,7 +426,7 @@ def main() -> None:
                 tx_result,
                 payload["grid"],
                 tx_output,
-                render_logic=args.render_logic,
+                render_logic="layered-sequence" if args.render_logic == "energy-pruned-sequence" else args.render_logic,
             )
 
         print(f"scene_id: {payload['scene_id']}")

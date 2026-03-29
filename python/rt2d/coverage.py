@@ -49,6 +49,15 @@ class PropagationState:
     source_vertex_id: int | None = None
 
 
+@dataclass(frozen=True)
+class SequenceCostConfig:
+    distance_weight: float = 0.85
+    reflection_penalty: float = 18.0
+    diffraction_penalty: float = 26.0
+    extra_interaction_penalty: float = 9.0
+    max_cost: float = 170.0
+
+
 def _make_grid(height: int, width: int, value: int = 0) -> list[list[int]]:
     return [[value for _ in range(width)] for _ in range(height)]
 
@@ -435,6 +444,80 @@ def build_layered_sequence_render_grid(
     return result, counts
 
 
+def _sequence_cost(
+    sequence: str,
+    distance: float,
+    config: SequenceCostConfig,
+) -> float:
+    if sequence == "L":
+        return config.distance_weight * distance
+
+    reflection_count = sequence.count("R")
+    diffraction_count = sequence.count("D")
+    return (
+        config.distance_weight * distance
+        + reflection_count * config.reflection_penalty
+        + diffraction_count * config.diffraction_penalty
+        + max(0, len(sequence) - 1) * config.extra_interaction_penalty
+    )
+
+
+def build_energy_pruned_sequence_render_grid(
+    sequence_hit_grids: dict[str, list[list[int]]],
+    outdoor_mask: list[list[bool]],
+    tx_point: Point,
+    grid: dict[str, Any],
+    config: SequenceCostConfig | None = None,
+) -> tuple[list[list[str]], dict[str, int]]:
+    if not outdoor_mask or not outdoor_mask[0]:
+        return [], {}
+
+    cfg = config or SequenceCostConfig()
+    height = len(outdoor_mask)
+    width = len(outdoor_mask[0])
+    step = float(grid["step"])
+    min_x = float(grid["min_x"])
+    max_y = float(grid["max_y"])
+
+    result = [["blocked" if not outdoor_mask[row][col] else "unreachable" for col in range(width)] for row in range(height)]
+    sequences = sorted(sequence_hit_grids.keys(), key=_sequence_priority_key, reverse=True)
+
+    for row in range(height):
+        y = max_y - row * step
+        for col in range(width):
+            if not outdoor_mask[row][col]:
+                continue
+
+            x = min_x + col * step
+            distance = math.hypot(x - tx_point[0], y - tx_point[1])
+            best_sequence: str | None = None
+            best_cost: float | None = None
+
+            for sequence in sequences:
+                if not sequence_hit_grids[sequence][row][col]:
+                    continue
+                cost = _sequence_cost(sequence, distance, cfg)
+                if cost > cfg.max_cost:
+                    continue
+                if best_cost is None or cost < best_cost - 1.0e-9:
+                    best_sequence = sequence
+                    best_cost = cost
+                    continue
+                if best_cost is not None and abs(cost - best_cost) <= 1.0e-9:
+                    if best_sequence is None or _sequence_priority_key(sequence) > _sequence_priority_key(best_sequence):
+                        best_sequence = sequence
+                        best_cost = cost
+
+            if best_sequence is not None:
+                result[row][col] = best_sequence
+
+    counts: dict[str, int] = {}
+    for row in result:
+        for label in row:
+            counts[label] = counts.get(label, 0) + 1
+    return result, counts
+
+
 def _export_rx_visibility_json(
     payload: dict[str, Any],
     output_path: str | Path | None,
@@ -460,6 +543,7 @@ def compute_rx_visibility(
     enable_reflection: bool = True,
     enable_diffraction: bool = True,
     include_sequence_render_grid: bool = False,
+    include_sequence_hit_grids: bool = False,
     output_path: str | Path | None = None,
 ) -> dict[str, Any]:
     if max_interactions < 0:
@@ -614,6 +698,8 @@ def compute_rx_visibility(
             )
             tx_result["layered_sequence_grid"] = layered_grid
             tx_result["layered_sequence_counts"] = layered_counts
+            if include_sequence_hit_grids:
+                tx_result["sequence_hit_grids"] = sequence_hit_grids
         payload["tx_results"].append(tx_result)
 
     return _export_rx_visibility_json(payload, output_path)

@@ -15,6 +15,7 @@
 - 为 `RX` 可视化新增 `layered-sequence` 渲染逻辑，并与原有 `minimal-order` 逻辑并存；新逻辑会按精确序列显示 `R / D / RR / RD / DR / DD ...`，并支持你指定的纯绕射区域覆写规则。
 - 明确固化 `layered-sequence` 下的一阶同阶优先级：在去除 `LoS` 区域后，`1阶 R` 会覆盖 `1阶 D`。
 - 为 `rt2d.compute_rx_visibility(...)` 新增可选的 `layered_sequence_grid` 辅助结果，可供新渲染逻辑直接消费。
+- 新增实验性 `energy-pruned-sequence` 渲染逻辑：在保留原始几何命中序列的前提下，额外用简化距离/交互代价对高阶弱路径做裁剪，便于和 `RadioMapSeer IRT2` 一类能量图做对比试验。
 - 新增 `tests/test_coverage.py`，覆盖空场景 LoS、一阶反射、一阶绕射、二阶反射和四阶上限支持。
 
 ### Breaking
@@ -27,6 +28,7 @@
 - 如需命令行导出 `RX` 可见性结果，使用 `python .\\python\\examples\\extract_rx_visibility.py <scene_id> --max-interactions 4 --output .\\build\\rx_visibility.json`。
 - 如需将 `RX` 可见性结果直接出图，使用 `python .\\python\\examples\\visualize_rx_visibility.py <scene_id> --max-interactions 4 --output .\\build\\rx_visibility.png`；如需按像素图导出，可追加 `--mode aligned --scale 4`。
 - 如需使用新的序列分层渲染逻辑，追加 `--render-logic layered-sequence`；如需同时把该分层结果写入 JSON，使用 `extract_rx_visibility.py --include-layered-sequence-grid`。
+- 如需试验更接近能量图的裁剪效果，可使用 `visualize_rx_visibility.py --render-logic energy-pruned-sequence`；当前这一模式仍是经验型近似，不代表最终物理模型。
 - 对数字 `scene_id`，`extract_rx_visibility.py` 和 `visualize_rx_visibility.py` 现在默认使用 `0..255` 的整图区域；如果你只想导出局部场景包围盒，显式传入 `--bounds min_x min_y max_x max_y`。
 - `visibility_order_grid` 采用行优先且 `y` 从大到小的布局，标签约定为：`-2=建筑内/边界`, `-1=不可达`, `0=LoS`, `1..4=最小交互阶数`。
 
@@ -112,3 +114,16 @@
 
 
 
+## 2026-03-29
+
+### Changed
+- 新增 `python/examples/compare_radiomapseer_feature_maps.py`，可直接读取 `RadioMapSeer` 的 `buildings_complete / antenna / gain(DPM, IRT2)`，生成基于当前 `RX visibility` 序列图的特征边界图，并与 `gain` 的高频纹理做对齐比较。
+- 新脚本支持复用 `compute_rx_visibility(...)` 的 `layered_sequence_grid`、`sequence_hit_grids` 和当前 `energy_pruned` 渲染逻辑，统一比较 `L / R / D / RR / RD / DR / DD` 等不同组合。
+- 新脚本会输出样本级对比 PNG、缓存 JSON、以及汇总 `summary.json / summary.csv`，便于继续调参和批量筛选更贴近 `RadioMapSeer` 纹理的序列组合。
+
+### Breaking
+- 无兼容性影响。
+
+### Migration
+- 如需比较当前 RT 特征边界与 `RadioMapSeer gain` 的纹理对齐效果，运行 `python .\\python\\examples\\compare_radiomapseer_feature_maps.py --samples 0:0 0:1 0:2 --output-dir .\\build\\radiomapseer_feature_compare`。
+- 如需复用已计算的 `RX visibility` 结果，保持相同 `--output-dir` 并去掉 `--force-recompute`，脚本会直接读取缓存 JSON 重新评分和出图。
