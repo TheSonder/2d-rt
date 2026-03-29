@@ -12,6 +12,8 @@
 - 新增 `python/examples/extract_rx_visibility.py`，支持按场景导出 `RX` 栅格可见性 JSON。
 - 新增 `python/examples/visualize_rx_visibility.py`，支持将 `RX` 可见性结果按阶数着色渲染为 PNG，并提供 `pretty / aligned` 两种出图模式。
 - 调整 `RX` 导出与可视化脚本的默认区域策略：对数字场景 `scene_id`，在未显式传入 `--bounds` 时默认对齐到 `RadioMapSeer` 的整张 `256x256` 区域，即 `0..255`。
+- 为 `RX` 可视化新增 `layered-sequence` 渲染逻辑，并与原有 `minimal-order` 逻辑并存；新逻辑会按精确序列显示 `R / D / RR / RD / DR / DD ...`，并支持你指定的纯绕射区域覆写规则。
+- 为 `rt2d.compute_rx_visibility(...)` 新增可选的 `layered_sequence_grid` 辅助结果，可供新渲染逻辑直接消费。
 - 新增 `tests/test_coverage.py`，覆盖空场景 LoS、一阶反射、一阶绕射、二阶反射和四阶上限支持。
 
 ### Breaking
@@ -23,6 +25,7 @@
 - 如需输出 `RX` 栅格的最小可达阶数，调用 `rt2d.compute_rx_visibility(scene_id_or_scene, tx_ids=..., max_interactions=..., grid_step=1.0, ...)`。
 - 如需命令行导出 `RX` 可见性结果，使用 `python .\\python\\examples\\extract_rx_visibility.py <scene_id> --max-interactions 4 --output .\\build\\rx_visibility.json`。
 - 如需将 `RX` 可见性结果直接出图，使用 `python .\\python\\examples\\visualize_rx_visibility.py <scene_id> --max-interactions 4 --output .\\build\\rx_visibility.png`；如需按像素图导出，可追加 `--mode aligned --scale 4`。
+- 如需使用新的序列分层渲染逻辑，追加 `--render-logic layered-sequence`；如需同时把该分层结果写入 JSON，使用 `extract_rx_visibility.py --include-layered-sequence-grid`。
 - 对数字 `scene_id`，`extract_rx_visibility.py` 和 `visualize_rx_visibility.py` 现在默认使用 `0..255` 的整图区域；如果你只想导出局部场景包围盒，显式传入 `--bounds min_x min_y max_x max_y`。
 - `visibility_order_grid` 采用行优先且 `y` 从大到小的布局，标签约定为：`-2=建筑内/边界`, `-1=不可达`, `0=LoS`, `1..4=最小交互阶数`。
 

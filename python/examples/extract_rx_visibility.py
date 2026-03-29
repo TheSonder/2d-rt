@@ -71,6 +71,11 @@ def main() -> None:
         action="store_true",
         help="Disable diffraction states.",
     )
+    parser.add_argument(
+        "--include-layered-sequence-grid",
+        action="store_true",
+        help="Include the new layered sequence rendering grid in the exported JSON.",
+    )
     args = parser.parse_args()
     bounds = _default_bounds(args.scene_id, args.bounds)
 
@@ -83,6 +88,7 @@ def main() -> None:
         epsilon=args.epsilon,
         enable_reflection=not args.disable_reflection,
         enable_diffraction=not args.disable_diffraction,
+        include_sequence_render_grid=args.include_layered_sequence_grid,
         output_path=args.output,
     )
 

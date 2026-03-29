@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python"))
 
 import rt2d
+from rt2d.coverage import build_layered_sequence_render_grid
 
 
 def _label_at(payload: dict[str, object], tx_index: int, x: float, y: float) -> int:
@@ -23,6 +24,45 @@ def _label_at(payload: dict[str, object], tx_index: int, x: float, y: float) -> 
 
 
 class RxCoverageTests(unittest.TestCase):
+    def test_layered_sequence_grid_prefers_reflection_over_first_order_diffraction(self) -> None:
+        outdoor_mask = [[True]]
+        sequence_hit_grids = {
+            "L": [[0]],
+            "D": [[1]],
+            "RR": [[1]],
+        }
+
+        grid, counts = build_layered_sequence_render_grid(sequence_hit_grids, outdoor_mask)
+
+        self.assertEqual(grid[0][0], "RR")
+        self.assertEqual(counts["RR"], 1)
+
+    def test_layered_sequence_grid_allows_third_order_suffix_r_to_override_dd(self) -> None:
+        outdoor_mask = [[True]]
+        sequence_hit_grids = {
+            "L": [[0]],
+            "DD": [[1]],
+            "DDR": [[1]],
+        }
+
+        grid, counts = build_layered_sequence_render_grid(sequence_hit_grids, outdoor_mask)
+
+        self.assertEqual(grid[0][0], "DDR")
+        self.assertEqual(counts["DDR"], 1)
+
+    def test_layered_sequence_grid_keeps_dd_when_only_third_order_suffix_d_exists(self) -> None:
+        outdoor_mask = [[True]]
+        sequence_hit_grids = {
+            "L": [[0]],
+            "DD": [[1]],
+            "DDD": [[1]],
+        }
+
+        grid, counts = build_layered_sequence_render_grid(sequence_hit_grids, outdoor_mask)
+
+        self.assertEqual(grid[0][0], "DD")
+        self.assertEqual(counts["DD"], 1)
+
     def test_empty_scene_marks_all_grid_points_as_los(self) -> None:
         scene = {
             "scene_id": "empty-grid",

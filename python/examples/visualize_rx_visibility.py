@@ -40,6 +40,12 @@ INDEX_TO_STYLE = {
     6: {"color": "#7C3AED", "label": "Order 4"},
 }
 
+SPECIAL_LABEL_STYLES = {
+    "blocked": {"color": "#111827", "label": "Blocked"},
+    "unreachable": {"color": "#F8FAFC", "label": "Unreachable"},
+    "L": {"color": "#0B6E4F", "label": "LoS"},
+}
+
 
 def _default_bounds(scene_id: str, requested_bounds: list[float] | None) -> tuple[float, float, float, float] | None:
     if requested_bounds is not None:
@@ -54,6 +60,29 @@ def _grid_to_index_grid(grid: list[list[int]]) -> list[list[int]]:
         [LABEL_TO_INDEX.get(int(value), LABEL_TO_INDEX[-1]) for value in row]
         for row in grid
     ]
+
+
+def _sequence_render_styles(labels: list[str]) -> dict[str, dict[str, str]]:
+    styles = {label: SPECIAL_LABEL_STYLES[label] for label in SPECIAL_LABEL_STYLES if label in labels}
+    dynamic = [label for label in labels if label not in styles]
+    if not dynamic:
+        return styles
+
+    cmap = matplotlib.colormaps["tab20"]
+    total = max(len(dynamic), 1)
+    for index, label in enumerate(sorted(dynamic, key=lambda value: (len(value), value))):
+        color = matplotlib.colors.to_hex(cmap(index / total))
+        styles[label] = {"color": color, "label": label}
+    return styles
+
+
+def _grid_to_label_index_grid(
+    grid: list[list[str]],
+    labels: list[str],
+) -> tuple[list[list[int]], dict[str, int]]:
+    label_to_index = {label: index for index, label in enumerate(labels)}
+    data = [[label_to_index[label] for label in row] for row in grid]
+    return data, label_to_index
 
 
 def _style_rgba(index: int) -> tuple[int, int, int, int]:
@@ -108,25 +137,33 @@ def _plot_scene(ax: plt.Axes, scene: dict[str, Any]) -> None:
         ax.fill(xs, ys, facecolor="#111827", edgecolor="#111827", linewidth=0.8, alpha=0.95, zorder=3)
 
 
-def _build_legend(ax: plt.Axes, counts: dict[str, int]) -> None:
+def _build_legend(ax: plt.Axes, counts: dict[str, int], styles: dict[str, dict[str, str]]) -> None:
     ordered = [
-        ("blocked", 0),
-        ("unreachable", 1),
-        ("los", 2),
-        ("order1", 3),
-        ("order2", 4),
-        ("order3", 5),
-        ("order4", 6),
+        "blocked",
+        "unreachable",
+        "L",
+        "los",
+        "order1",
+        "order2",
+        "order3",
+        "order4",
     ]
     handles = []
     labels = []
-    for count_key, index in ordered:
+    remaining_keys = [key for key in counts if key not in ordered and int(counts[key]) > 0]
+    for count_key in ordered + remaining_keys:
         count = int(counts.get(count_key, 0))
         if count == 0:
             continue
-        handle = plt.Line2D([0], [0], marker="s", linestyle="None", markersize=10, color=INDEX_TO_STYLE[index]["color"])
+        style = styles.get(count_key)
+        if style is None and count_key in {"los", "order1", "order2", "order3", "order4"}:
+            fallback_index = {"los": 2, "order1": 3, "order2": 4, "order3": 5, "order4": 6}[count_key]
+            style = INDEX_TO_STYLE[fallback_index]
+        if style is None:
+            continue
+        handle = plt.Line2D([0], [0], marker="s", linestyle="None", markersize=10, color=style["color"])
         handles.append(handle)
-        labels.append(f"{INDEX_TO_STYLE[index]['label']} ({count})")
+        labels.append(f"{style['label']} ({count})")
 
     if handles:
         ax.legend(handles, labels, loc="upper right", frameon=True, framealpha=0.96)
@@ -138,11 +175,31 @@ def _render_pretty(
     tx_result: dict[str, Any],
     grid: dict[str, Any],
     output_path: Path,
+    *,
+    render_logic: str,
 ) -> None:
     extent = _build_extent(grid)
-    colors = [INDEX_TO_STYLE[index]["color"] for index in sorted(INDEX_TO_STYLE)]
+    if render_logic == "layered-sequence":
+        label_grid = tx_result["layered_sequence_grid"]
+        labels = sorted({label for row in label_grid for label in row}, key=lambda value: (value not in SPECIAL_LABEL_STYLES, len(value), value))
+        styles = _sequence_render_styles(labels)
+        data, label_to_index = _grid_to_label_index_grid(label_grid, labels)
+        colors = [styles[label]["color"] for label, _index in sorted(label_to_index.items(), key=lambda item: item[1])]
+        counts = tx_result["layered_sequence_counts"]
+    else:
+        colors = [INDEX_TO_STYLE[index]["color"] for index in sorted(INDEX_TO_STYLE)]
+        data = _grid_to_index_grid(tx_result["visibility_order_grid"])
+        styles = {
+            "blocked": INDEX_TO_STYLE[0],
+            "unreachable": INDEX_TO_STYLE[1],
+            "los": INDEX_TO_STYLE[2],
+            "order1": INDEX_TO_STYLE[3],
+            "order2": INDEX_TO_STYLE[4],
+            "order3": INDEX_TO_STYLE[5],
+            "order4": INDEX_TO_STYLE[6],
+        }
+        counts = tx_result["counts"]
     cmap = ListedColormap(colors)
-    data = _grid_to_index_grid(tx_result["visibility_order_grid"])
 
     fig, ax = plt.subplots(figsize=(10.0, 10.0), constrained_layout=True)
     fig.patch.set_facecolor("#F3F4F6")
@@ -157,11 +214,12 @@ def _render_pretty(
     ax.set_aspect("equal", adjustable="box")
     ax.set_xlim(extent[0], extent[1])
     ax.set_ylim(extent[2], extent[3])
-    ax.set_title(f"Scene {scene['scene_id']} TX {tx_id} RX Visibility", fontsize=13)
+    title_suffix = "Layered Sequence" if render_logic == "layered-sequence" else "Minimal Order"
+    ax.set_title(f"Scene {scene['scene_id']} TX {tx_id} RX Visibility ({title_suffix})", fontsize=13)
     ax.set_xlabel("x")
     ax.set_ylabel("y")
     ax.grid(True, color="#D1D5DB", linewidth=0.5, alpha=0.55)
-    _build_legend(ax, tx_result["counts"])
+    _build_legend(ax, counts, styles)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=220, pad_inches=0.05)
@@ -175,15 +233,35 @@ def _render_aligned(
     grid: dict[str, Any],
     output_path: Path,
     scale: int,
+    *,
+    render_logic: str,
 ) -> None:
     width = int(grid["width"])
     height = int(grid["height"])
+    if render_logic == "layered-sequence":
+        label_grid = tx_result["layered_sequence_grid"]
+        labels = sorted({label for row in label_grid for label in row}, key=lambda value: (value not in SPECIAL_LABEL_STYLES, len(value), value))
+        styles = _sequence_render_styles(labels)
+
+        def color_at(row: int, col: int) -> tuple[int, int, int, int]:
+            color = matplotlib.colors.to_rgba(styles[label_grid[row][col]]["color"], 1.0)
+            return (
+                int(round(color[0] * 255.0)),
+                int(round(color[1] * 255.0)),
+                int(round(color[2] * 255.0)),
+                int(round(color[3] * 255.0)),
+            )
+    else:
+        data = _grid_to_index_grid(tx_result["visibility_order_grid"])
+
+        def color_at(row: int, col: int) -> tuple[int, int, int, int]:
+            return _style_rgba(data[row][col])
+
     image = Image.new("RGBA", (width, height), _style_rgba(1))
     pixels = image.load()
-    data = _grid_to_index_grid(tx_result["visibility_order_grid"])
     for y in range(height):
         for x in range(width):
-            pixels[x, y] = _style_rgba(data[y][x])
+            pixels[x, y] = color_at(y, x)
 
     draw = ImageDraw.Draw(image, "RGBA")
     min_x = float(grid["min_x"])
@@ -239,6 +317,12 @@ def main() -> None:
         help="Visualization mode. 'aligned' writes the RX grid directly as a pixel map.",
     )
     parser.add_argument(
+        "--render-logic",
+        choices=("minimal-order", "layered-sequence"),
+        default="minimal-order",
+        help="Choose between the original minimal-order rendering and the new layered sequence rendering.",
+    )
+    parser.add_argument(
         "--scale",
         type=int,
         default=4,
@@ -289,6 +373,7 @@ def main() -> None:
             bounds=bounds,
             enable_reflection=not args.disable_reflection,
             enable_diffraction=not args.disable_diffraction,
+            include_sequence_render_grid=args.render_logic == "layered-sequence",
         )
     else:
         payload = json.loads(args.rx_json.read_text(encoding="utf-8"))
@@ -299,15 +384,36 @@ def main() -> None:
 
     for tx_id in tx_ids:
         tx_result = tx_results[tx_id]
+        if args.render_logic == "layered-sequence" and "layered_sequence_grid" not in tx_result:
+            raise ValueError(
+                "Selected render logic requires layered_sequence_grid in the payload. "
+                "Recompute on the fly without --rx-json or export a payload that includes layered sequence data."
+            )
         tx_output = _resolve_output_path(output, str(payload["scene_id"]), tx_id, multiple_outputs)
         if args.mode == "aligned":
-            _render_aligned(scene, tx_id, tx_result, payload["grid"], tx_output, max(args.scale, 1))
+            _render_aligned(
+                scene,
+                tx_id,
+                tx_result,
+                payload["grid"],
+                tx_output,
+                max(args.scale, 1),
+                render_logic=args.render_logic,
+            )
         else:
-            _render_pretty(scene, tx_id, tx_result, payload["grid"], tx_output)
+            _render_pretty(
+                scene,
+                tx_id,
+                tx_result,
+                payload["grid"],
+                tx_output,
+                render_logic=args.render_logic,
+            )
 
         print(f"scene_id: {payload['scene_id']}")
         print(f"tx_id: {tx_id}")
         print(f"mode: {args.mode}")
+        print(f"render_logic: {args.render_logic}")
         print(f"output: {tx_output}")
 
 

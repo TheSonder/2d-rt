@@ -49,6 +49,10 @@ class PropagationState:
     source_vertex_id: int | None = None
 
 
+def _make_grid(height: int, width: int, value: int = 0) -> list[list[int]]:
+    return [[value for _ in range(width)] for _ in range(height)]
+
+
 def _make_state(
     sequence: str,
     source_point: Point,
@@ -351,6 +355,80 @@ def _state_reaches_rx(
     )
 
 
+def _sequence_priority_key(sequence: str) -> tuple[int, int, tuple[int, ...]]:
+    reflection_count = sequence.count("R")
+    ends_with_reflection = 1 if sequence.endswith("R") else 0
+    char_rank = tuple(1 if char == "R" else 0 for char in sequence)
+    return (reflection_count, ends_with_reflection, char_rank)
+
+
+def _is_pure_diffraction(sequence: str) -> bool:
+    return bool(sequence) and set(sequence) == {"D"}
+
+
+def _can_override_sequence(existing_label: str, candidate_sequence: str) -> bool:
+    if not _is_pure_diffraction(existing_label):
+        return False
+    if len(candidate_sequence) != len(existing_label) + 1:
+        return False
+    if len(candidate_sequence) == 2:
+        return candidate_sequence == "RR"
+    return candidate_sequence.endswith("R")
+
+
+def build_layered_sequence_render_grid(
+    sequence_hit_grids: dict[str, list[list[int]]],
+    outdoor_mask: list[list[bool]],
+) -> tuple[list[list[str]], dict[str, int]]:
+    if not outdoor_mask or not outdoor_mask[0]:
+        return [], {}
+
+    height = len(outdoor_mask)
+    width = len(outdoor_mask[0])
+    result = [["blocked" if not outdoor_mask[row][col] else "unreachable" for col in range(width)] for row in range(height)]
+
+    los_grid = sequence_hit_grids.get("L")
+    if los_grid is not None:
+        for row in range(height):
+            for col in range(width):
+                if outdoor_mask[row][col] and los_grid[row][col]:
+                    result[row][col] = "L"
+
+    max_depth = max((len(sequence) for sequence in sequence_hit_grids if sequence != "L"), default=0)
+    for depth in range(1, max_depth + 1):
+        sequences = [sequence for sequence in sequence_hit_grids if len(sequence) == depth]
+        if not sequences:
+            continue
+        ordered_sequences = sorted(sequences, key=_sequence_priority_key, reverse=True)
+        for row in range(height):
+            for col in range(width):
+                if not outdoor_mask[row][col]:
+                    continue
+
+                best_sequence: str | None = None
+                for sequence in ordered_sequences:
+                    if sequence_hit_grids[sequence][row][col]:
+                        best_sequence = sequence
+                        break
+
+                if best_sequence is None:
+                    continue
+
+                current = result[row][col]
+                if current == "unreachable":
+                    result[row][col] = best_sequence
+                    continue
+                if _can_override_sequence(current, best_sequence):
+                    result[row][col] = best_sequence
+
+    counts: dict[str, int] = {}
+    for row in result:
+        for label in row:
+            counts[label] = counts.get(label, 0) + 1
+
+    return result, counts
+
+
 def _export_rx_visibility_json(
     payload: dict[str, Any],
     output_path: str | Path | None,
@@ -375,6 +453,7 @@ def compute_rx_visibility(
     epsilon: float = 1.0e-6,
     enable_reflection: bool = True,
     enable_diffraction: bool = True,
+    include_sequence_render_grid: bool = False,
     output_path: str | Path | None = None,
 ) -> dict[str, Any]:
     if max_interactions < 0:
@@ -430,10 +509,13 @@ def compute_rx_visibility(
         [_is_outdoor_point((x, y), geom) for x in x_coords]
         for y in y_coords
     ]
+    height = len(y_coords)
+    width = len(x_coords)
 
     for tx_id in indices:
         tx = geom.antennas[tx_id]
         states_by_order: dict[int, list[PropagationState]] = {}
+        sequence_groups_by_order: dict[int, dict[str, list[PropagationState]]] = {}
         frontier = [_make_state("", tx, None)]
 
         for depth in range(1, max_interactions + 1):
@@ -445,9 +527,19 @@ def compute_rx_visibility(
                     next_frontier.extend(_expand_diffraction_successors(state, geom))
             frontier = _dedupe_states(next_frontier, geom.epsilon)
             states_by_order[depth] = frontier
+            groups: dict[str, list[PropagationState]] = {}
+            for state in frontier:
+                groups.setdefault(state.sequence, []).append(state)
+            sequence_groups_by_order[depth] = groups
 
         visibility_order_grid: list[list[int]] = []
         remaining: list[tuple[int, int, Point]] = []
+        sequence_hit_grids: dict[str, list[list[int]]] | None = None
+        if include_sequence_render_grid:
+            sequence_hit_grids = {"L": _make_grid(height, width)}
+            for groups in sequence_groups_by_order.values():
+                for sequence in groups:
+                    sequence_hit_grids.setdefault(sequence, _make_grid(height, width))
         counts = {
             "blocked": 0,
             "unreachable": 0,
@@ -470,6 +562,8 @@ def compute_rx_visibility(
                 if is_visible(tx, point, geom):
                     grid_row.append(0)
                     counts["los"] += 1
+                    if sequence_hit_grids is not None:
+                        sequence_hit_grids["L"][row][col] = 1
                     continue
 
                 grid_row.append(-1)
@@ -478,6 +572,13 @@ def compute_rx_visibility(
 
         for depth in range(1, max_interactions + 1):
             states = states_by_order.get(depth, [])
+            sequence_groups = sequence_groups_by_order.get(depth, {})
+            if sequence_hit_grids is not None and sequence_groups:
+                for row, col, point in remaining:
+                    for sequence, grouped_states in sequence_groups.items():
+                        if any(_state_reaches_rx(state, point, geom) for state in grouped_states):
+                            sequence_hit_grids[sequence][row][col] = 1
+
             if not states or not remaining:
                 continue
 
@@ -491,16 +592,22 @@ def compute_rx_visibility(
             remaining = next_remaining
 
         counts["unreachable"] = len(remaining)
-        payload["tx_results"].append(
-            {
-                "tx_id": tx_id,
-                "counts": counts,
-                "state_counts": {
-                    f"order{depth}": len(states_by_order.get(depth, []))
-                    for depth in range(1, max_interactions + 1)
-                },
-                "visibility_order_grid": visibility_order_grid,
-            }
-        )
+        tx_result = {
+            "tx_id": tx_id,
+            "counts": counts,
+            "state_counts": {
+                f"order{depth}": len(states_by_order.get(depth, []))
+                for depth in range(1, max_interactions + 1)
+            },
+            "visibility_order_grid": visibility_order_grid,
+        }
+        if sequence_hit_grids is not None:
+            layered_grid, layered_counts = build_layered_sequence_render_grid(
+                sequence_hit_grids,
+                outdoor_mask,
+            )
+            tx_result["layered_sequence_grid"] = layered_grid
+            tx_result["layered_sequence_counts"] = layered_counts
+        payload["tx_results"].append(tx_result)
 
     return _export_rx_visibility_json(payload, output_path)
