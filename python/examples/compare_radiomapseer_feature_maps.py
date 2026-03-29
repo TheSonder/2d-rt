@@ -23,8 +23,8 @@ from rt2d.coverage import (
 )
 
 GRID_BOUNDS = (0.0, 0.0, 255.0, 255.0)
-DEFAULT_SAMPLES = ["0:0", "0:1", "1:0"]
-REFERENCE_PERCENTILES = (90.0, 95.0, 97.0)
+DEFAULT_SAMPLES = ["0:0", "0:1", "0:2"]
+REFERENCE_PERCENTILES = (60.0, 70.0, 80.0, 90.0, 95.0, 97.0)
 
 
 @dataclass(frozen=True)
@@ -32,19 +32,26 @@ class CandidateConfig:
     name: str
     sequences: tuple[str, ...] | None
     energy_pruned: bool = False
+    target: str = "generic"
 
+DPM_CANDIDATE_CONFIGS = (
+    CandidateConfig("los_only", ("L",), target="dpm"),
+    CandidateConfig("order1_reflection", ("L", "R"), target="dpm"),
+    CandidateConfig("order1_diffraction", ("L", "D"), target="dpm"),
+    CandidateConfig("order1_reflection_diffraction", ("L", "R", "D"), target="dpm"),
+)
 
-CANDIDATE_CONFIGS = (
-    CandidateConfig("los_only", ("L",)),
-    CandidateConfig("order1_reflection", ("L", "R")),
-    CandidateConfig("order1_diffraction", ("L", "D")),
-    CandidateConfig("order1_reflection_diffraction", ("L", "R", "D")),
-    CandidateConfig("reflection_family_order2", ("L", "R", "RR")),
-    CandidateConfig("diffraction_family_order2", ("L", "D", "DD")),
-    CandidateConfig("order2_no_rr", ("L", "R", "D", "RD", "DR", "DD")),
-    CandidateConfig("order2_no_dd", ("L", "R", "D", "RR", "RD", "DR")),
-    CandidateConfig("order2_full", ("L", "R", "D", "RR", "RD", "DR", "DD")),
-    CandidateConfig("energy_pruned_order2", None, energy_pruned=True),
+IRT2_CANDIDATE_CONFIGS = (
+    CandidateConfig("rr_only", ("RR",), target="irt2"),
+    CandidateConfig("dd_only", ("DD",), target="irt2"),
+    CandidateConfig("rd_only", ("RD",), target="irt2"),
+    CandidateConfig("dr_only", ("DR",), target="irt2"),
+    CandidateConfig("reflection_family_order2", ("RR", "RD", "DR"), target="irt2"),
+    CandidateConfig("diffraction_family_order2", ("DD", "RD", "DR"), target="irt2"),
+    CandidateConfig("order2_no_rr", ("RD", "DR", "DD"), target="irt2"),
+    CandidateConfig("order2_no_dd", ("RR", "RD", "DR"), target="irt2"),
+    CandidateConfig("order2_full", ("RR", "RD", "DR", "DD"), target="irt2"),
+    CandidateConfig("energy_pruned_order2", ("RR", "RD", "DR", "DD"), energy_pruned=True, target="irt2"),
 )
 
 
@@ -93,7 +100,17 @@ def _candidate_label_grid(
             grid_meta,
             SequenceCostConfig(),
         )
-        return label_grid
+        if candidate.sequences is None:
+            return label_grid
+        return [
+            [
+                label
+                if label == "blocked" or label in candidate.sequences
+                else "unreachable"
+                for label in row
+            ]
+            for row in label_grid
+        ]
 
     restricted = {
         sequence: sequence_hit_grids[sequence]
@@ -162,13 +179,17 @@ def _score_candidate_against_gain(
     pred = boundary_mask & scoring_mask
     positive_scores = gain_strength[scoring_mask & (gain_strength > 0.0)]
     background_scores = gain_strength[scoring_mask]
+    total_energy = float(positive_scores.sum()) if positive_scores.size > 0 else 0.0
 
     metrics: dict[str, float] = {
         "predicted_pixels": float(pred.sum()),
         "edge_lift": 0.0,
+        "energy_capture": 0.0,
     }
     if pred.any() and background_scores.size > 0 and float(background_scores.mean()) > 0.0:
         metrics["edge_lift"] = float(gain_strength[pred].mean() / background_scores.mean())
+    if pred.any() and total_energy > 0.0:
+        metrics["energy_capture"] = float(gain_strength[pred].sum() / total_energy)
 
     if positive_scores.size == 0:
         for percentile in REFERENCE_PERCENTILES:
@@ -237,20 +258,78 @@ def _write_summary_csv(rows: list[dict[str, object]], output_path: Path) -> None
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
         "sample",
+        "target",
         "candidate",
-        "dpm_f1_mean",
-        "irt2_f1_mean",
-        "avg_f1_mean",
-        "dpm_edge_lift",
-        "irt2_edge_lift",
-        "avg_edge_lift",
+        "f1_mean",
+        "edge_lift",
+        "energy_capture",
         "predicted_pixels",
     ]
+    for percentile in REFERENCE_PERCENTILES:
+        fieldnames.append(f"f1_p{int(percentile)}")
     with output_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
+
+
+def _reference_mask(
+    gain_strength: np.ndarray,
+    scoring_mask: np.ndarray,
+    percentile: float = 90.0,
+) -> np.ndarray:
+    positive_scores = gain_strength[scoring_mask & (gain_strength > 0.0)]
+    if positive_scores.size == 0:
+        return np.zeros(gain_strength.shape, dtype=bool)
+    threshold = float(np.percentile(positive_scores, percentile))
+    return scoring_mask & (gain_strength >= threshold) & (gain_strength > 0.0)
+
+
+def _evaluate_candidates(
+    candidates: tuple[CandidateConfig, ...],
+    tx_result: dict[str, Any],
+    scene: dict[str, object],
+    tx_id: int,
+    outdoor_mask: np.ndarray,
+    grid_meta: dict[str, Any],
+    gain_strength: np.ndarray,
+    scoring_mask: np.ndarray,
+    sample_name: str,
+) -> tuple[list[dict[str, object]], dict[str, np.ndarray]]:
+    ranking: list[dict[str, object]] = []
+    candidate_masks: dict[str, np.ndarray] = {}
+
+    for candidate in candidates:
+        label_grid = _candidate_label_grid(
+            tx_result,
+            scene,
+            tx_id,
+            candidate,
+            outdoor_mask,
+            grid_meta,
+        )
+        boundary_mask = _boundary_mask_from_label_grid(label_grid, outdoor_mask)
+        candidate_masks[candidate.name] = boundary_mask
+        metrics = _score_candidate_against_gain(boundary_mask, gain_strength, scoring_mask)
+        ranking.append(
+            {
+                "sample": sample_name,
+                "target": candidate.target,
+                "candidate": candidate.name,
+                "metrics": metrics,
+            }
+        )
+
+    ranking.sort(
+        key=lambda item: (
+            item["metrics"]["f1_mean"],
+            item["metrics"]["energy_capture"],
+            item["metrics"]["edge_lift"],
+        ),
+        reverse=True,
+    )
+    return ranking, candidate_masks
 
 
 def main() -> None:
@@ -295,7 +374,8 @@ def main() -> None:
     image_dir.mkdir(parents=True, exist_ok=True)
 
     sample_pairs = [_parse_sample(value) for value in args.samples]
-    summary_rows: list[dict[str, object]] = []
+    dpm_summary_rows: list[dict[str, object]] = []
+    irt2_summary_rows: list[dict[str, object]] = []
     sample_results: list[dict[str, object]] = []
 
     for map_id, tx_id in sample_pairs:
@@ -331,112 +411,110 @@ def main() -> None:
         irt2_image = _load_gray_image(args.radiomapseer_root / "gain" / "IRT2" / f"{sample_name}.png")
         dpm_strength = _gain_edge_strength(dpm_image, scoring_mask)
         irt2_strength = _gain_edge_strength(irt2_image, scoring_mask)
-
-        per_candidate: list[dict[str, object]] = []
-        candidate_masks: dict[str, np.ndarray] = {}
-        candidate_ref_masks: dict[str, dict[str, np.ndarray]] = {}
-
-        for candidate in CANDIDATE_CONFIGS:
-            label_grid = _candidate_label_grid(
-                tx_result,
-                scene,
-                tx_id,
-                candidate,
-                payload_outdoor,
-                payload["grid"],
-            )
-            boundary_mask = _boundary_mask_from_label_grid(label_grid, payload_outdoor)
-            candidate_masks[candidate.name] = boundary_mask
-
-            dpm_metrics = _score_candidate_against_gain(boundary_mask, dpm_strength, scoring_mask)
-            irt2_metrics = _score_candidate_against_gain(boundary_mask, irt2_strength, scoring_mask)
-
-            ref_masks: dict[str, np.ndarray] = {}
-            for target_name, strength in (("dpm", dpm_strength), ("irt2", irt2_strength)):
-                positive_scores = strength[scoring_mask & (strength > 0.0)]
-                if positive_scores.size == 0:
-                    ref_masks[target_name] = np.zeros(strength.shape, dtype=bool)
-                    continue
-                threshold = float(np.percentile(positive_scores, 95.0))
-                ref_masks[target_name] = scoring_mask & (strength >= threshold) & (strength > 0.0)
-            candidate_ref_masks[candidate.name] = ref_masks
-
-            result = {
-                "sample": sample_name,
-                "candidate": candidate.name,
-                "dpm": dpm_metrics,
-                "irt2": irt2_metrics,
-                "avg_f1_mean": float((dpm_metrics["f1_mean"] + irt2_metrics["f1_mean"]) * 0.5),
-                "avg_edge_lift": float((dpm_metrics["edge_lift"] + irt2_metrics["edge_lift"]) * 0.5),
-            }
-            per_candidate.append(result)
-            summary_rows.append(
-                {
-                    "sample": sample_name,
-                    "candidate": candidate.name,
-                    "dpm_f1_mean": f"{dpm_metrics['f1_mean']:.6f}",
-                    "irt2_f1_mean": f"{irt2_metrics['f1_mean']:.6f}",
-                    "avg_f1_mean": f"{result['avg_f1_mean']:.6f}",
-                    "dpm_edge_lift": f"{dpm_metrics['edge_lift']:.6f}",
-                    "irt2_edge_lift": f"{irt2_metrics['edge_lift']:.6f}",
-                    "avg_edge_lift": f"{result['avg_edge_lift']:.6f}",
-                    "predicted_pixels": int(dpm_metrics["predicted_pixels"]),
-                }
-            )
-
-        ranking = sorted(
-            per_candidate,
-            key=lambda item: (item["avg_f1_mean"], item["avg_edge_lift"]),
-            reverse=True,
+        dpm_ranking, dpm_masks = _evaluate_candidates(
+            DPM_CANDIDATE_CONFIGS,
+            tx_result,
+            scene,
+            tx_id,
+            payload_outdoor,
+            payload["grid"],
+            dpm_strength,
+            scoring_mask,
+            sample_name,
         )
-        best = ranking[0]
-        current = next(item for item in ranking if item["candidate"] == "energy_pruned_order2")
+        irt2_ranking, irt2_masks = _evaluate_candidates(
+            IRT2_CANDIDATE_CONFIGS,
+            tx_result,
+            scene,
+            tx_id,
+            payload_outdoor,
+            payload["grid"],
+            irt2_strength,
+            scoring_mask,
+            sample_name,
+        )
 
-        best_mask = candidate_masks[str(best["candidate"])]
-        current_mask = candidate_masks[str(current["candidate"])]
-        best_refs = candidate_ref_masks[str(best["candidate"])]
+        for item in dpm_ranking:
+            row = {
+                "sample": sample_name,
+                "target": "dpm",
+                "candidate": item["candidate"],
+                "f1_mean": f"{item['metrics']['f1_mean']:.6f}",
+                "edge_lift": f"{item['metrics']['edge_lift']:.6f}",
+                "energy_capture": f"{item['metrics']['energy_capture']:.6f}",
+                "predicted_pixels": int(item["metrics"]["predicted_pixels"]),
+            }
+            for percentile in REFERENCE_PERCENTILES:
+                row[f"f1_p{int(percentile)}"] = f"{item['metrics'][f'f1_p{int(percentile)}']:.6f}"
+            dpm_summary_rows.append(row)
+
+        for item in irt2_ranking:
+            row = {
+                "sample": sample_name,
+                "target": "irt2",
+                "candidate": item["candidate"],
+                "f1_mean": f"{item['metrics']['f1_mean']:.6f}",
+                "edge_lift": f"{item['metrics']['edge_lift']:.6f}",
+                "energy_capture": f"{item['metrics']['energy_capture']:.6f}",
+                "predicted_pixels": int(item["metrics"]["predicted_pixels"]),
+            }
+            for percentile in REFERENCE_PERCENTILES:
+                row[f"f1_p{int(percentile)}"] = f"{item['metrics'][f'f1_p{int(percentile)}']:.6f}"
+            irt2_summary_rows.append(row)
+
+        dpm_best = dpm_ranking[0]
+        irt2_best = irt2_ranking[0]
+        irt2_current = next(item for item in irt2_ranking if item["candidate"] == "energy_pruned_order2")
+        dpm_ref = _reference_mask(dpm_strength, scoring_mask, percentile=90.0)
+        irt2_ref = _reference_mask(irt2_strength, scoring_mask, percentile=90.0)
 
         dpm_panel = [
             ("DPM", Image.fromarray(dpm_image, mode="L").convert("RGB")),
             ("DPM-edge", Image.fromarray(_normalize_to_u8(dpm_strength), mode="L").convert("RGB")),
-            ("Best-boundary", Image.fromarray(best_mask.astype(np.uint8) * 255, mode="L").convert("RGB")),
-            ("Best-overlay", _overlay_mask(dpm_image, best_refs["dpm"], best_mask)),
-            ("Current-overlay", _overlay_mask(dpm_image, best_refs["dpm"], current_mask)),
+            ("Best-boundary", Image.fromarray(dpm_masks[str(dpm_best["candidate"])].astype(np.uint8) * 255, mode="L").convert("RGB")),
+            ("Best-overlay", _overlay_mask(dpm_image, dpm_ref, dpm_masks[str(dpm_best["candidate"])])),
         ]
         _tile_images_with_titles(dpm_panel, image_dir / f"{sample_name}_dpm_compare.png")
 
         irt2_panel = [
             ("IRT2", Image.fromarray(irt2_image, mode="L").convert("RGB")),
             ("IRT2-edge", Image.fromarray(_normalize_to_u8(irt2_strength), mode="L").convert("RGB")),
-            ("Best-boundary", Image.fromarray(best_mask.astype(np.uint8) * 255, mode="L").convert("RGB")),
-            ("Best-overlay", _overlay_mask(irt2_image, best_refs["irt2"], best_mask)),
-            ("Current-overlay", _overlay_mask(irt2_image, best_refs["irt2"], current_mask)),
+            ("Best-boundary", Image.fromarray(irt2_masks[str(irt2_best["candidate"])].astype(np.uint8) * 255, mode="L").convert("RGB")),
+            ("Best-overlay", _overlay_mask(irt2_image, irt2_ref, irt2_masks[str(irt2_best["candidate"])])),
+            ("Energy-overlay", _overlay_mask(irt2_image, irt2_ref, irt2_masks[str(irt2_current["candidate"])])),
         ]
         _tile_images_with_titles(irt2_panel, image_dir / f"{sample_name}_irt2_compare.png")
 
         sample_results.append(
             {
                 "sample": sample_name,
-                "ranking": ranking,
-                "best_candidate": best["candidate"],
-                "current_candidate": current["candidate"],
+                "dpm_ranking": dpm_ranking,
+                "irt2_ranking": irt2_ranking,
+                "dpm_best_candidate": dpm_best["candidate"],
+                "irt2_best_candidate": irt2_best["candidate"],
+                "irt2_current_candidate": irt2_current["candidate"],
                 "state_counts": tx_result["state_counts"],
                 "counts": tx_result["counts"],
             }
         )
 
         print(
-            f"  best={best['candidate']} avg_f1_mean={best['avg_f1_mean']:.4f} "
-            f"avg_edge_lift={best['avg_edge_lift']:.4f}"
+            f"  dpm_best={dpm_best['candidate']} f1_mean={dpm_best['metrics']['f1_mean']:.4f} "
+            f"energy_capture={dpm_best['metrics']['energy_capture']:.4f}"
         )
         print(
-            f"  current={current['candidate']} avg_f1_mean={current['avg_f1_mean']:.4f} "
-            f"avg_edge_lift={current['avg_edge_lift']:.4f}"
+            f"  irt2_best={irt2_best['candidate']} f1_mean={irt2_best['metrics']['f1_mean']:.4f} "
+            f"energy_capture={irt2_best['metrics']['energy_capture']:.4f}"
+        )
+        print(
+            f"  irt2_current={irt2_current['candidate']} f1_mean={irt2_current['metrics']['f1_mean']:.4f} "
+            f"energy_capture={irt2_current['metrics']['energy_capture']:.4f}"
         )
 
     result_payload = {
         "samples": sample_results,
-        "candidate_order": [candidate.name for candidate in CANDIDATE_CONFIGS],
+        "dpm_candidate_order": [candidate.name for candidate in DPM_CANDIDATE_CONFIGS],
+        "irt2_candidate_order": [candidate.name for candidate in IRT2_CANDIDATE_CONFIGS],
         "reference_percentiles": list(REFERENCE_PERCENTILES),
         "max_interactions": args.max_interactions,
     }
@@ -445,10 +523,14 @@ def main() -> None:
         json.dumps(result_payload, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
-    _write_summary_csv(summary_rows, args.output_dir / "summary.csv")
+    dpm_summary_csv = args.output_dir / "summary_dpm.csv"
+    irt2_summary_csv = args.output_dir / "summary_irt2.csv"
+    _write_summary_csv(dpm_summary_rows, dpm_summary_csv)
+    _write_summary_csv(irt2_summary_rows, irt2_summary_csv)
 
     print(f"summary_json: {summary_json_path}")
-    print(f"summary_csv: {args.output_dir / 'summary.csv'}")
+    print(f"summary_dpm_csv: {dpm_summary_csv}")
+    print(f"summary_irt2_csv: {irt2_summary_csv}")
     print(f"image_dir: {image_dir}")
 
 
