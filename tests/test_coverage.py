@@ -24,18 +24,18 @@ def _label_at(payload: dict[str, object], tx_index: int, x: float, y: float) -> 
 
 
 class RxCoverageTests(unittest.TestCase):
-    def test_layered_sequence_grid_prefers_reflection_over_first_order_diffraction(self) -> None:
+    def test_layered_sequence_grid_prefers_first_order_reflection_over_first_order_diffraction(self) -> None:
         outdoor_mask = [[True]]
         sequence_hit_grids = {
             "L": [[0]],
             "D": [[1]],
-            "RR": [[1]],
+            "R": [[1]],
         }
 
         grid, counts = build_layered_sequence_render_grid(sequence_hit_grids, outdoor_mask)
 
-        self.assertEqual(grid[0][0], "RR")
-        self.assertEqual(counts["RR"], 1)
+        self.assertEqual(grid[0][0], "R")
+        self.assertEqual(counts["R"], 1)
 
     def test_layered_sequence_grid_allows_third_order_suffix_r_to_override_dd(self) -> None:
         outdoor_mask = [[True]]

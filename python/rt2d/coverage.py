@@ -356,6 +356,12 @@ def _state_reaches_rx(
 
 
 def _sequence_priority_key(sequence: str) -> tuple[int, int, tuple[int, ...]]:
+    if len(sequence) == 1:
+        if sequence == "R":
+            return (10, 10, (1,))
+        if sequence == "D":
+            return (0, 0, (0,))
+
     reflection_count = sequence.count("R")
     ends_with_reflection = 1 if sequence.endswith("R") else 0
     char_rank = tuple(1 if char == "R" else 0 for char in sequence)

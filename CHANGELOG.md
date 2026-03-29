@@ -13,6 +13,7 @@
 - 新增 `python/examples/visualize_rx_visibility.py`，支持将 `RX` 可见性结果按阶数着色渲染为 PNG，并提供 `pretty / aligned` 两种出图模式。
 - 调整 `RX` 导出与可视化脚本的默认区域策略：对数字场景 `scene_id`，在未显式传入 `--bounds` 时默认对齐到 `RadioMapSeer` 的整张 `256x256` 区域，即 `0..255`。
 - 为 `RX` 可视化新增 `layered-sequence` 渲染逻辑，并与原有 `minimal-order` 逻辑并存；新逻辑会按精确序列显示 `R / D / RR / RD / DR / DD ...`，并支持你指定的纯绕射区域覆写规则。
+- 明确固化 `layered-sequence` 下的一阶同阶优先级：在去除 `LoS` 区域后，`1阶 R` 会覆盖 `1阶 D`。
 - 为 `rt2d.compute_rx_visibility(...)` 新增可选的 `layered_sequence_grid` 辅助结果，可供新渲染逻辑直接消费。
 - 新增 `tests/test_coverage.py`，覆盖空场景 LoS、一阶反射、一阶绕射、二阶反射和四阶上限支持。
 
