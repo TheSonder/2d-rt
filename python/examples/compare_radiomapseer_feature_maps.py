@@ -8,6 +8,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image, ImageDraw
 
@@ -123,19 +126,61 @@ def _candidate_label_grid(
 
 def _boundary_mask_from_label_grid(label_grid: list[list[str]], outdoor_mask: np.ndarray) -> np.ndarray:
     labels = np.asarray(label_grid, dtype=object)
-    boundary = np.zeros(labels.shape, dtype=bool)
+    height, width = labels.shape
+    numeric = np.full((height, width), np.nan, dtype=np.float32)
 
-    valid_h = outdoor_mask[:, :-1] & outdoor_mask[:, 1:]
-    diff_h = valid_h & (labels[:, :-1] != labels[:, 1:])
-    boundary[:, :-1] |= diff_h
-    boundary[:, 1:] |= diff_h
+    valid_labels = sorted({str(label) for label in labels[outdoor_mask]})
+    label_to_index = {label: float(index) for index, label in enumerate(valid_labels)}
+    for label, index in label_to_index.items():
+        numeric[(labels == label) & outdoor_mask] = index
 
-    valid_v = outdoor_mask[:-1, :] & outdoor_mask[1:, :]
-    diff_v = valid_v & (labels[:-1, :] != labels[1:, :])
-    boundary[:-1, :] |= diff_v
-    boundary[1:, :] |= diff_v
+    unique_values = sorted(label_to_index.values())
+    if len(unique_values) <= 1:
+        return np.zeros((height, width), dtype=bool)
 
-    return boundary & outdoor_mask
+    fig, ax = plt.subplots(figsize=(1.0, 1.0))
+    contour = ax.contour(
+        numeric,
+        levels=[value + 0.5 for value in unique_values[:-1]],
+        linewidths=1.0,
+        corner_mask=False,
+    )
+    plt.close(fig)
+
+    scale = 4
+    highres = Image.new("L", (width * scale, height * scale), 0)
+    draw = ImageDraw.Draw(highres)
+
+    for level_segments in contour.allsegs:
+        for segment in level_segments:
+            if len(segment) < 2:
+                continue
+            points = [
+                (
+                    float(point[0]) * scale + scale * 0.5,
+                    float(point[1]) * scale + scale * 0.5,
+                )
+                for point in segment
+            ]
+            draw.line(points, fill=255, width=max(1, scale // 2))
+
+    highres_array = np.asarray(highres, dtype=np.uint8)
+    reduced = highres_array.reshape(height, scale, width, scale).max(axis=(1, 3))
+    return (reduced > 32) & outdoor_mask
+
+
+def _render_boundary_image(boundary_mask: np.ndarray) -> Image.Image:
+    scale = 4
+    image = Image.fromarray(boundary_mask.astype(np.uint8) * 255, mode="L")
+    image = image.resize(
+        (boundary_mask.shape[1] * scale, boundary_mask.shape[0] * scale),
+        Image.Resampling.BILINEAR,
+    )
+    image = image.resize(
+        (boundary_mask.shape[1], boundary_mask.shape[0]),
+        Image.Resampling.LANCZOS,
+    )
+    return image.convert("RGB")
 
 
 def _gain_edge_strength(gain_image: np.ndarray, outdoor_mask: np.ndarray) -> np.ndarray:
@@ -163,12 +208,33 @@ def _precision_recall_f1(pred_mask: np.ndarray, ref_mask: np.ndarray) -> tuple[f
     if pred_count == 0 or ref_count == 0:
         return 0.0, 0.0, 0.0
 
-    overlap = int(np.count_nonzero(pred_mask & ref_mask))
-    precision = overlap / pred_count
-    recall = overlap / ref_count
+    ref_dilated = _dilate_mask(ref_mask, radius=1)
+    pred_dilated = _dilate_mask(pred_mask, radius=1)
+    precision_hits = int(np.count_nonzero(pred_mask & ref_dilated))
+    recall_hits = int(np.count_nonzero(ref_mask & pred_dilated))
+    precision = precision_hits / pred_count
+    recall = recall_hits / ref_count
     if precision + recall <= 0.0:
         return precision, recall, 0.0
     return precision, recall, (2.0 * precision * recall) / (precision + recall)
+
+
+def _dilate_mask(mask: np.ndarray, radius: int) -> np.ndarray:
+    if radius <= 0:
+        return mask
+
+    padded = np.pad(mask, radius, mode="constant", constant_values=False)
+    result = np.zeros(mask.shape, dtype=bool)
+    for dy in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            if dx * dx + dy * dy > radius * radius:
+                continue
+            view = padded[
+                radius + dy : radius + dy + mask.shape[0],
+                radius + dx : radius + dx + mask.shape[1],
+            ]
+            result |= view
+    return result
 
 
 def _score_candidate_against_gain(
@@ -471,7 +537,7 @@ def main() -> None:
         dpm_panel = [
             ("DPM", Image.fromarray(dpm_image, mode="L").convert("RGB")),
             ("DPM-edge", Image.fromarray(_normalize_to_u8(dpm_strength), mode="L").convert("RGB")),
-            ("Best-boundary", Image.fromarray(dpm_masks[str(dpm_best["candidate"])].astype(np.uint8) * 255, mode="L").convert("RGB")),
+            ("Best-boundary", _render_boundary_image(dpm_masks[str(dpm_best["candidate"])])),
             ("Best-overlay", _overlay_mask(dpm_image, dpm_ref, dpm_masks[str(dpm_best["candidate"])])),
         ]
         _tile_images_with_titles(dpm_panel, image_dir / f"{sample_name}_dpm_compare.png")
@@ -479,7 +545,7 @@ def main() -> None:
         irt2_panel = [
             ("IRT2", Image.fromarray(irt2_image, mode="L").convert("RGB")),
             ("IRT2-edge", Image.fromarray(_normalize_to_u8(irt2_strength), mode="L").convert("RGB")),
-            ("Best-boundary", Image.fromarray(irt2_masks[str(irt2_best["candidate"])].astype(np.uint8) * 255, mode="L").convert("RGB")),
+            ("Best-boundary", _render_boundary_image(irt2_masks[str(irt2_best["candidate"])])),
             ("Best-overlay", _overlay_mask(irt2_image, irt2_ref, irt2_masks[str(irt2_best["candidate"])])),
             ("Energy-overlay", _overlay_mask(irt2_image, irt2_ref, irt2_masks[str(irt2_current["candidate"])])),
         ]
