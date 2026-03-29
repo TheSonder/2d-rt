@@ -12,7 +12,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 
 PROJECT_PYTHON_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_PYTHON_ROOT) not in sys.path:
@@ -200,6 +200,80 @@ def _gain_edge_strength(gain_image: np.ndarray, outdoor_mask: np.ndarray) -> np.
     strength[1:, :] = np.maximum(strength[1:, :], diff_v)
 
     return strength
+
+
+def _box_blur(image: np.ndarray, radius: int) -> np.ndarray:
+    if radius <= 0:
+        return image.astype(np.float32)
+    pil_image = Image.fromarray(np.clip(image * 255.0, 0.0, 255.0).astype(np.uint8), mode="L")
+    blurred = pil_image.filter(ImageFilter.BoxBlur(radius))
+    return np.asarray(blurred, dtype=np.float32) / 255.0
+
+
+def _normalize_response(response: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    values = response[mask]
+    if values.size == 0:
+        return np.zeros(response.shape, dtype=np.float32)
+    high = float(np.percentile(values, 99.0))
+    if high <= 1.0e-9:
+        return np.zeros(response.shape, dtype=np.float32)
+    return np.clip(response / high, 0.0, 1.0).astype(np.float32)
+
+
+def _texture_response(gain_image: np.ndarray, outdoor_mask: np.ndarray) -> np.ndarray:
+    image = gain_image.astype(np.float32) / 255.0
+    edge = _gain_edge_strength(gain_image, outdoor_mask)
+    blur_1 = _box_blur(image, radius=1)
+    blur_3 = _box_blur(image, radius=3)
+    blur_6 = _box_blur(image, radius=6)
+    detail_1 = np.abs(image - blur_1)
+    detail_3 = np.abs(image - blur_3)
+    detail_6 = np.abs(image - blur_6)
+    combined = (
+        0.40 * edge
+        + 0.30 * detail_1
+        + 0.20 * detail_3
+        + 0.10 * detail_6
+    )
+    combined *= outdoor_mask
+    return _normalize_response(combined, outdoor_mask)
+
+
+def _dpm_texture_strength(gain_image: np.ndarray, outdoor_mask: np.ndarray) -> np.ndarray:
+    image = gain_image.astype(np.float32) / 255.0
+    edge = _gain_edge_strength(gain_image, outdoor_mask)
+    blur_1 = _box_blur(image, radius=1)
+    detail_1 = np.abs(image - blur_1)
+    combined = (
+        0.80 * edge
+        + 0.20 * detail_1
+    )
+    combined *= outdoor_mask
+    return _normalize_response(combined, outdoor_mask)
+
+
+def _irt2_texture_strength(
+    irt2_image: np.ndarray,
+    dpm_image: np.ndarray,
+    outdoor_mask: np.ndarray,
+) -> np.ndarray:
+    irt2_base = _texture_response(irt2_image, outdoor_mask)
+    dpm_base = _texture_response(dpm_image, outdoor_mask)
+    irt2_norm = irt2_image.astype(np.float32) / 255.0
+    dpm_norm = dpm_image.astype(np.float32) / 255.0
+    residual_image = np.abs(irt2_norm - dpm_norm)
+    residual_texture = _texture_response(
+        np.clip(residual_image * 255.0, 0.0, 255.0).astype(np.uint8),
+        outdoor_mask,
+    )
+    residual_bonus = np.maximum(irt2_base - 0.55 * dpm_base, 0.0)
+    combined = (
+        0.50 * irt2_base
+        + 0.35 * residual_texture
+        + 0.15 * residual_bonus
+    )
+    combined *= outdoor_mask
+    return _normalize_response(combined, outdoor_mask)
 
 
 def _precision_recall_f1(pred_mask: np.ndarray, ref_mask: np.ndarray) -> tuple[float, float, float]:
@@ -475,8 +549,13 @@ def main() -> None:
 
         dpm_image = _load_gray_image(args.radiomapseer_root / "gain" / "DPM" / f"{sample_name}.png")
         irt2_image = _load_gray_image(args.radiomapseer_root / "gain" / "IRT2" / f"{sample_name}.png")
-        dpm_strength = _gain_edge_strength(dpm_image, scoring_mask)
-        irt2_strength = _gain_edge_strength(irt2_image, scoring_mask)
+        dpm_strength = _dpm_texture_strength(dpm_image, scoring_mask)
+        irt2_strength = _irt2_texture_strength(irt2_image, dpm_image, scoring_mask)
+        irt2_residual_image = np.clip(
+            np.abs(irt2_image.astype(np.int16) - dpm_image.astype(np.int16)),
+            0,
+            255,
+        ).astype(np.uint8)
         dpm_ranking, dpm_masks = _evaluate_candidates(
             DPM_CANDIDATE_CONFIGS,
             tx_result,
@@ -532,11 +611,11 @@ def main() -> None:
         irt2_best = irt2_ranking[0]
         irt2_current = next(item for item in irt2_ranking if item["candidate"] == "energy_pruned_order2")
         dpm_ref = _reference_mask(dpm_strength, scoring_mask, percentile=90.0)
-        irt2_ref = _reference_mask(irt2_strength, scoring_mask, percentile=90.0)
+        irt2_ref = _reference_mask(irt2_strength, scoring_mask, percentile=80.0)
 
         dpm_panel = [
             ("DPM", Image.fromarray(dpm_image, mode="L").convert("RGB")),
-            ("DPM-edge", Image.fromarray(_normalize_to_u8(dpm_strength), mode="L").convert("RGB")),
+            ("DPM-texture", Image.fromarray(_normalize_to_u8(dpm_strength), mode="L").convert("RGB")),
             ("Best-boundary", _render_boundary_image(dpm_masks[str(dpm_best["candidate"])])),
             ("Best-overlay", _overlay_mask(dpm_image, dpm_ref, dpm_masks[str(dpm_best["candidate"])])),
         ]
@@ -544,7 +623,8 @@ def main() -> None:
 
         irt2_panel = [
             ("IRT2", Image.fromarray(irt2_image, mode="L").convert("RGB")),
-            ("IRT2-edge", Image.fromarray(_normalize_to_u8(irt2_strength), mode="L").convert("RGB")),
+            ("IRT2-texture", Image.fromarray(_normalize_to_u8(irt2_strength), mode="L").convert("RGB")),
+            ("IRT2-residual", Image.fromarray(irt2_residual_image, mode="L").convert("RGB")),
             ("Best-boundary", _render_boundary_image(irt2_masks[str(irt2_best["candidate"])])),
             ("Best-overlay", _overlay_mask(irt2_image, irt2_ref, irt2_masks[str(irt2_best["candidate"])])),
             ("Energy-overlay", _overlay_mask(irt2_image, irt2_ref, irt2_masks[str(irt2_current["candidate"])])),

@@ -123,6 +123,8 @@
 - 调整 `compare_radiomapseer_feature_maps.py`，改为将 `DPM` 与 `IRT2` 分开评分：`DPM` 只比较 `LoS / 一阶 R/D`，`IRT2` 只比较二阶 `RR / DD / RD / DR`。
 - 调整 `compare_radiomapseer_feature_maps.py` 的 `Best-boundary` 生成方式，使用更平滑的 contour 线替代原先的硬栅格边界，减轻低分辨率下的锯齿误差。
 - 调整 `compare_radiomapseer_feature_maps.py` 的评分逻辑，加入覆盖中弱纹理的多阈值 `F1` 与 1 像素容忍匹配，并新增 `energy_capture` 指标。
+- 继续增强 `compare_radiomapseer_feature_maps.py` 的 `IRT2` 纹理提取，改为结合多尺度纹理响应与相对 `DPM` 的残差响应，并将 `IRT2` 可视化参考区域的默认阈值放宽到更能覆盖浅纹理的水平。
+- 将 `compare_radiomapseer_feature_maps.py` 的 `DPM` 参考提取重新独立出来，改为“边界梯度为主、局部细纹理为辅”的轻量响应，避免被 `IRT2 residual` 的浅纹理增强逻辑带偏。
 
 ### Breaking
 - 无兼容性影响。
@@ -131,3 +133,5 @@
 - 如需比较当前 RT 特征边界与 `RadioMapSeer gain` 的纹理对齐效果，运行 `python .\\python\\examples\\compare_radiomapseer_feature_maps.py --samples 0:0 0:1 0:2 --output-dir .\\build\\radiomapseer_feature_compare`。
 - 如需复用已计算的 `RX visibility` 结果，保持相同 `--output-dir` 并去掉 `--force-recompute`，脚本会直接读取缓存 JSON 重新评分和出图。
 - 新版本会分别输出 `summary_dpm.csv` 和 `summary_irt2.csv`；如需看 `Best-overlay`，建议结合新的平滑 `Best-boundary` 与多阈值评分一起判断，不再只看最强纹理区域。
+- 新版 `IRT2` 面板额外包含 `IRT2-residual`，用于辅助判断哪些浅纹理是二阶新增结构，而不是直接沿用 `DPM` 的纹理。
+- `DPM` 与 `IRT2` 现在使用不同的参考纹理提取器；如果你在看 `Best-overlay`，不要再假设两者的红色参考区域来自同一套提取逻辑。
