@@ -61,6 +61,35 @@ class RxCoverageTests(unittest.TestCase):
         self.assertEqual(direct_payload["grid"], runtime_payload["grid"])
         self.assertEqual(direct_payload["tx_results"], runtime_payload["tx_results"])
 
+    def test_runtime_warm_keeps_results_consistent(self) -> None:
+        scene = {
+            "scene_id": "runtime-warm",
+            "antenna": [[-2.0, 2.0]],
+            "polygons": [
+                [[0.0, 0.0], [2.0, 0.0], [2.0, 4.0], [0.0, 4.0], [0.0, 0.0]],
+                [[4.0, -1.0], [6.0, -1.0], [6.0, 5.0], [4.0, 5.0], [4.0, -1.0]],
+            ],
+        }
+
+        runtime = rt2d.build_rx_visibility_runtime(
+            scene,
+            bounds=(-3.0, -2.0, 8.0, 7.0),
+            acceleration_backend="cpu",
+        )
+        rt2d.warm_rx_visibility_runtime(
+            runtime,
+            tx_ids=[0],
+            max_interactions=2,
+        )
+        payload = rt2d.compute_rx_visibility_runtime(
+            runtime,
+            tx_ids=[0],
+            max_interactions=2,
+            include_sequence_render_grid=True,
+            include_sequence_hit_grids=True,
+        )
+        self.assertEqual(_label_at(payload, 0, 8.0, 5.0), 2)
+
     def test_torch_backend_matches_cpu_on_small_scene(self) -> None:
         if importlib.util.find_spec("torch") is None:
             self.skipTest("torch not installed")

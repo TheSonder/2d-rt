@@ -44,15 +44,18 @@ def _evaluate_map(
     if cache_path.is_file():
         payload = json.loads(cache_path.read_text(encoding="utf-8"))
     else:
-        payload = rt2d.compute_rx_visibility(
+        runtime = rt2d.build_rx_visibility_runtime(
             scene,
-            tx_ids=tx_ids,
-            max_interactions=max_interactions,
             bounds=compare.GRID_BOUNDS,
-            include_sequence_render_grid=True,
-            include_sequence_hit_grids=True,
             acceleration_backend=acceleration_backend,
             torch_device=torch_device,
+        )
+        payload = rt2d.compute_rx_visibility_runtime(
+            runtime,
+            tx_ids=tx_ids,
+            max_interactions=max_interactions,
+            include_sequence_render_grid=True,
+            include_sequence_hit_grids=True,
             torch_state_chunk_size=torch_state_chunk_size,
             torch_point_chunk_size=torch_point_chunk_size,
             torch_edge_chunk_size=torch_edge_chunk_size,

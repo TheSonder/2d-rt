@@ -151,7 +151,11 @@
 - 为 `rt2d.compute_rx_visibility(...)` 新增可选的 `torch` 加速后端，当前保持原有算法和状态展开逻辑不变，只将 `state -> rx` reachability 判定改为基于 PyTorch 的分块批量计算。
 - 新增 `acceleration_backend / torch_device / torch_state_chunk_size / torch_point_chunk_size / torch_edge_chunk_size` 参数，用于控制 `compute_rx_visibility(...)` 的新后端。
 - 新增 `rt2d.build_rx_visibility_runtime(...)` 与 `rt2d.compute_rx_visibility_runtime(...)`，用于在加载 scene 后缓存 geometry、`256x256` 栅格、outdoor mask、GPU 张量和按 `tx / order / enable_reflection / enable_diffraction` 维度缓存的状态展开结果。
+- 新增 `rt2d.warm_rx_visibility_runtime(...)`，可显式预热指定 `tx / order` 的 `state expansion` 与 `TorchStateBatch` 缓存，减少首次推理时的 CPU 准备开销。
 - 调整 `python/examples/compare_radiomapseer_feature_maps.py` 和 `python/examples/evaluate_partition_batch.py`，使其支持直接透传新的加速后端参数。
+- 调整 `python/examples/evaluate_partition_batch.py`，改为按 `scene-wise runtime` 路径批量评估：每张 map 只构建一次 runtime，然后在同一 runtime 上处理固定 tx 组。
 - 新增 `tests/test_coverage.py` 中的 CPU / torch 后端等价性测试，使用 `torch_device='cpu'` 校验两种后端在小场景上的输出一致。
+- 新增 `tests/test_coverage.py` 中的 runtime builder / runtime warm 一致性测试，校验新引入的运行时缓存接口不会改变结果。
 - 在 `rt2d_env` 实测 `scene 0, tx 0, max_interactions=1, 256x256` 下，`cpu` 约 `69.7s`，`torch-cpu` 约 `25.4s`，`torch-cuda` 约 `16.7s`。
 - 在 `rt2d_env` 的 runtime 复用模式下，`scene 0` 的 GPU 预处理约 `12.4s`，随后单个 `tx 0`、`max_interactions=1` 的推理约 `2.7s ~ 4.3s`，可将“场景预处理”和“单次推理”拆开计时。
+- 在 `rt2d_env` 的 runtime + state cache 路径下，`scene 0, tx 0, max_interactions=1` 的单次推理稳定在约 `2.5s`，同一 runtime 上重复推理时不再重复构建 `state expansion / TorchStateBatch`。

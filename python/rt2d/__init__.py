@@ -10,7 +10,12 @@ from .boundary import (
     is_visible,
     merge_and_label_boundaries,
 )
-from .coverage import build_rx_visibility_runtime, compute_rx_visibility, compute_rx_visibility_runtime
+from .coverage import (
+    build_rx_visibility_runtime,
+    compute_rx_visibility,
+    compute_rx_visibility_runtime,
+    warm_rx_visibility_runtime,
+)
 from .loader import load_library
 from .scene import load_scene
 
@@ -33,6 +38,7 @@ __all__ = [
     "compute_visible_subsegments",
     "compute_rx_visibility",
     "compute_rx_visibility_runtime",
+    "warm_rx_visibility_runtime",
     "export_boundaries_json",
     "extract_los_boundaries",
     "extract_reflection_boundaries",
