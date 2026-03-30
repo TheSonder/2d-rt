@@ -146,3 +146,5 @@
 - 将 `python/examples/compare_radiomapseer_feature_maps.py` 重写为只比较 `partition` 路线，不再混入 `tube / 真实边界线` 方案；当前脚本的核心问题改为“`RT` 栅格分区与 `DPM / IRT2 gain` 真值的对应好坏”。
 - 当前 `compare_radiomapseer_feature_maps.py` 中，`DPM` 候选包含 `minimal_order1 / layered_reflection / layered_diffraction / layered_full`，`IRT2` 候选包含 `minimal_order2 / layered_rr / layered_dd / layered_rd / layered_dr / layered_order2_* / energy_pruned_order2`。
 - 当前对齐图中的第三栏已改为 `Best-partition`，显示的是分区结果本身；`Best-overlay` 和 `Energy-overlay` 只用于查看分区边界和 `gain` 真值纹理是否对齐。
+- 新增 `python/examples/evaluate_partition_batch.py`，支持按 `map` 范围和固定 `tx` 组批量评估 `partition` 候选在 `DPM / IRT2` 上的稳定性。
+- 新增 `docs/radiomapseer_partition_strategy.md`，整理当前 `RadioMapSeer partition` 对齐策略、覆盖原则、候选排列组合和评分口径，便于后续直接理解当前实验设定。
