@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -81,6 +81,25 @@ class TorchStateBatch:
     sequences: tuple[str, ...]
 
 
+@dataclass
+class RxVisibilityRuntime:
+    scene_id: str
+    geom: GeometryIndex
+    grid: dict[str, Any]
+    x_coords: tuple[float, ...]
+    y_coords: tuple[float, ...]
+    outdoor_mask: list[list[bool]]
+    outdoor_points: tuple[tuple[int, int, Point], ...]
+    outdoor_point_lookup: dict[tuple[int, int], int]
+    acceleration_backend: str
+    torch_device: str | None
+    torch_geom: TorchGeometryCache | None = None
+    torch_outdoor_points: Any = None
+    state_cache: dict[tuple[int, int, bool, bool], tuple[dict[int, list[PropagationState]], dict[int, dict[str, list[PropagationState]]]]] = field(
+        default_factory=dict
+    )
+
+
 def _import_torch() -> Any:
     import torch
 
@@ -150,6 +169,29 @@ def _build_torch_geometry_cache(
     )
 
 
+def _build_outdoor_mask_and_points(
+    x_coords: list[float],
+    y_coords: list[float],
+    geom: GeometryIndex,
+) -> tuple[list[list[bool]], tuple[tuple[int, int, Point], ...], dict[tuple[int, int], int]]:
+    outdoor_mask: list[list[bool]] = []
+    outdoor_points: list[tuple[int, int, Point]] = []
+    outdoor_point_lookup: dict[tuple[int, int], int] = {}
+
+    for row, y in enumerate(y_coords):
+        mask_row: list[bool] = []
+        for col, x in enumerate(x_coords):
+            point = (x, y)
+            is_outdoor = _is_outdoor_point(point, geom)
+            mask_row.append(is_outdoor)
+            if is_outdoor:
+                outdoor_point_lookup[(row, col)] = len(outdoor_points)
+                outdoor_points.append((row, col, point))
+        outdoor_mask.append(mask_row)
+
+    return (outdoor_mask, tuple(outdoor_points), outdoor_point_lookup)
+
+
 def _prepare_torch_state_batch(
     states: list[PropagationState],
     edge_count: int,
@@ -198,6 +240,86 @@ def _prepare_torch_state_batch(
         source_poly_ids=source_poly_ids,
         exclude_mask=exclude_mask,
         sequences=tuple(state.sequence for state in states),
+    )
+
+
+def build_rx_visibility_runtime(
+    scene: dict[str, Any] | str | int,
+    *,
+    root_dir: str | None = None,
+    grid_step: float = 1.0,
+    bounds: tuple[float, float, float, float] | None = None,
+    epsilon: float = 1.0e-6,
+    acceleration_backend: str = "cpu",
+    torch_device: str | None = None,
+) -> RxVisibilityRuntime:
+    if grid_step <= 0.0:
+        raise ValueError("grid_step must be > 0.")
+
+    if isinstance(scene, dict):
+        scene_data = scene
+    else:
+        scene_data = load_scene(scene, root_dir=root_dir)
+
+    geom = build_geometry(scene_data, epsilon=epsilon)
+    resolved_backend, resolved_torch_device = _resolve_acceleration_backend(
+        acceleration_backend,
+        torch_device,
+    )
+
+    min_x, min_y, max_x, max_y = _resolve_bounds(geom, bounds, grid_step)
+    x_coords = _build_axis(min_x, max_x, grid_step)
+    y_coords = list(reversed(_build_axis(min_y, max_y, grid_step)))
+    outdoor_mask, outdoor_points, outdoor_point_lookup = _build_outdoor_mask_and_points(
+        x_coords,
+        y_coords,
+        geom,
+    )
+
+    grid = {
+        "min_x": min_x,
+        "min_y": min_y,
+        "max_x": max_x,
+        "max_y": max_y,
+        "step": grid_step,
+        "width": len(x_coords),
+        "height": len(y_coords),
+        "row_major_y_descending": True,
+        "labels": {
+            "blocked": -2,
+            "unreachable": -1,
+            "los": 0,
+            "order1": 1,
+            "order2": 2,
+            "order3": 3,
+            "order4": 4,
+        },
+    }
+
+    torch_geom = None
+    torch_outdoor_points = None
+    if resolved_backend == "torch" and resolved_torch_device is not None:
+        torch_geom = _build_torch_geometry_cache(geom, resolved_torch_device)
+        torch = _import_torch()
+        torch_outdoor_points = torch.tensor(
+            [point for _, _, point in outdoor_points],
+            dtype=torch.float32,
+            device=resolved_torch_device,
+        )
+
+    return RxVisibilityRuntime(
+        scene_id=geom.scene_id,
+        geom=geom,
+        grid=grid,
+        x_coords=tuple(x_coords),
+        y_coords=tuple(y_coords),
+        outdoor_mask=outdoor_mask,
+        outdoor_points=outdoor_points,
+        outdoor_point_lookup=outdoor_point_lookup,
+        acceleration_backend=resolved_backend,
+        torch_device=resolved_torch_device,
+        torch_geom=torch_geom,
+        torch_outdoor_points=torch_outdoor_points,
     )
 
 
@@ -536,6 +658,77 @@ def _torch_evaluate_state_hits(
     return (overall_hits, sequence_hits)
 
 
+def _torch_evaluate_state_hits_from_indices(
+    states: list[PropagationState],
+    point_indices: list[int],
+    runtime: RxVisibilityRuntime,
+    state_chunk_size: int,
+    point_chunk_size: int,
+    edge_chunk_size: int,
+) -> tuple[list[bool], dict[str, list[bool]]]:
+    torch = _import_torch()
+    if not states or not point_indices:
+        return ([False for _ in point_indices], {})
+    if runtime.torch_outdoor_points is None or runtime.torch_geom is None or runtime.torch_device is None:
+        raise ValueError("runtime does not contain torch geometry cache.")
+
+    with torch.no_grad():
+        index_tensor = torch.tensor(point_indices, dtype=torch.int64, device=runtime.torch_device)
+        point_tensor = runtime.torch_outdoor_points.index_select(0, index_tensor)
+        state_batch = _prepare_torch_state_batch(states, runtime.torch_geom.edge_a.shape[0], runtime.torch_device)
+        overall_hits: list[bool] = [False for _ in point_indices]
+        sequence_hits: dict[str, list[bool]] = {sequence: [False for _ in point_indices] for sequence in set(state_batch.sequences)}
+
+        for point_start in range(0, point_tensor.shape[0], point_chunk_size):
+            point_stop = min(point_start + point_chunk_size, point_tensor.shape[0])
+            chunk_points = point_tensor[point_start:point_stop]
+            chunk_overall = torch.zeros((chunk_points.shape[0],), dtype=torch.bool, device=runtime.torch_device)
+            chunk_sequences = {
+                sequence: torch.zeros((chunk_points.shape[0],), dtype=torch.bool, device=runtime.torch_device)
+                for sequence in sequence_hits
+            }
+
+            for state_start in range(0, state_batch.source_points.shape[0], state_chunk_size):
+                state_stop = min(state_start + state_chunk_size, state_batch.source_points.shape[0])
+                chunk_state_batch = TorchStateBatch(
+                    source_points=state_batch.source_points[state_start:state_stop],
+                    left_dirs=state_batch.left_dirs[state_start:state_stop],
+                    right_dirs=state_batch.right_dirs[state_start:state_stop],
+                    has_tube_dirs=state_batch.has_tube_dirs[state_start:state_stop],
+                    diffraction_mask=state_batch.diffraction_mask[state_start:state_stop],
+                    source_poly_ids=state_batch.source_poly_ids[state_start:state_stop],
+                    exclude_mask=state_batch.exclude_mask[state_start:state_stop],
+                    sequences=state_batch.sequences[state_start:state_stop],
+                )
+                hit_matrix = _torch_state_chunk_reaches_points(
+                    chunk_state_batch,
+                    chunk_points,
+                    runtime.torch_geom,
+                    runtime.geom.epsilon,
+                    edge_chunk_size,
+                )
+                if hit_matrix.shape[0] == 0:
+                    continue
+
+                chunk_overall |= hit_matrix.any(dim=0)
+                local_sequences = sorted(set(chunk_state_batch.sequences))
+                for sequence in local_sequences:
+                    state_ids = [index for index, value in enumerate(chunk_state_batch.sequences) if value == sequence]
+                    if state_ids:
+                        chunk_sequences[sequence] |= hit_matrix[state_ids].any(dim=0)
+
+            overall_cpu = chunk_overall.to("cpu").tolist()
+            for offset, value in enumerate(overall_cpu):
+                overall_hits[point_start + offset] = bool(value)
+
+            for sequence, hits in chunk_sequences.items():
+                hits_cpu = hits.to("cpu").tolist()
+                for offset, value in enumerate(hits_cpu):
+                    sequence_hits[sequence][point_start + offset] = bool(value)
+
+    return (overall_hits, sequence_hits)
+
+
 def _resolve_bounds(
     geom: GeometryIndex,
     bounds: tuple[float, float, float, float] | None,
@@ -733,6 +926,41 @@ def _expand_diffraction_successors(
     return _dedupe_states(children, geom.epsilon)
 
 
+def _get_or_build_state_expansion(
+    runtime: RxVisibilityRuntime,
+    tx_id: int,
+    max_interactions: int,
+    enable_reflection: bool,
+    enable_diffraction: bool,
+) -> tuple[dict[int, list[PropagationState]], dict[int, dict[str, list[PropagationState]]]]:
+    cache_key = (tx_id, max_interactions, enable_reflection, enable_diffraction)
+    cached = runtime.state_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    states_by_order: dict[int, list[PropagationState]] = {}
+    sequence_groups_by_order: dict[int, dict[str, list[PropagationState]]] = {}
+    frontier = [_make_state("", runtime.geom.antennas[tx_id], None)]
+
+    for depth in range(1, max_interactions + 1):
+        next_frontier: list[PropagationState] = []
+        for state in frontier:
+            if enable_reflection:
+                next_frontier.extend(_expand_reflection_successors(state, runtime.geom))
+            if enable_diffraction:
+                next_frontier.extend(_expand_diffraction_successors(state, runtime.geom))
+        frontier = _dedupe_states(next_frontier, runtime.geom.epsilon)
+        states_by_order[depth] = frontier
+
+        groups: dict[str, list[PropagationState]] = {}
+        for state in frontier:
+            groups.setdefault(state.sequence, []).append(state)
+        sequence_groups_by_order[depth] = groups
+
+    runtime.state_cache[cache_key] = (states_by_order, sequence_groups_by_order)
+    return (states_by_order, sequence_groups_by_order)
+
+
 def _state_reaches_rx(
     state: PropagationState,
     rx: Point,
@@ -927,6 +1155,183 @@ def _export_rx_visibility_json(
     return payload
 
 
+def compute_rx_visibility_runtime(
+    runtime: RxVisibilityRuntime,
+    *,
+    tx_ids: list[int] | None = None,
+    max_interactions: int = 1,
+    enable_reflection: bool = True,
+    enable_diffraction: bool = True,
+    include_sequence_render_grid: bool = False,
+    include_sequence_hit_grids: bool = False,
+    torch_state_chunk_size: int = 16,
+    torch_point_chunk_size: int = 4096,
+    torch_edge_chunk_size: int = 64,
+    output_path: str | Path | None = None,
+) -> dict[str, Any]:
+    if max_interactions < 0:
+        raise ValueError("max_interactions must be >= 0.")
+    if max_interactions > 4:
+        raise NotImplementedError("max_interactions > 4 is not implemented yet.")
+    if not enable_reflection and not enable_diffraction and max_interactions > 0:
+        max_interactions = 0
+
+    indices = tx_ids if tx_ids is not None else list(range(len(runtime.geom.antennas)))
+    antenna_count = len(runtime.geom.antennas)
+    for tx_id in indices:
+        if tx_id < 0 or tx_id >= antenna_count:
+            raise ValueError(f"tx_id out of range: {tx_id}. Valid range: 0..{antenna_count - 1}")
+
+    payload: dict[str, Any] = {
+        "scene_id": runtime.scene_id,
+        "grid": runtime.grid,
+        "tx_results": [],
+    }
+
+    height = len(runtime.y_coords)
+    width = len(runtime.x_coords)
+
+    for tx_id in indices:
+        tx = runtime.geom.antennas[tx_id]
+        states_by_order, sequence_groups_by_order = _get_or_build_state_expansion(
+            runtime,
+            tx_id,
+            max_interactions,
+            enable_reflection,
+            enable_diffraction,
+        )
+
+        visibility_order_grid = [
+            [-2 if not runtime.outdoor_mask[row][col] else -1 for col in range(width)]
+            for row in range(height)
+        ]
+        counts = {
+            "blocked": 0,
+            "unreachable": 0,
+            "los": 0,
+            "order1": 0,
+            "order2": 0,
+            "order3": 0,
+            "order4": 0,
+        }
+        for row in range(height):
+            for col in range(width):
+                if runtime.outdoor_mask[row][col]:
+                    continue
+                counts["blocked"] += 1
+
+        sequence_hit_grids: dict[str, list[list[int]]] | None = None
+        if include_sequence_render_grid:
+            sequence_hit_grids = {"L": _make_grid(height, width)}
+            for groups in sequence_groups_by_order.values():
+                for sequence in groups:
+                    sequence_hit_grids.setdefault(sequence, _make_grid(height, width))
+
+        outdoor_entries = list(runtime.outdoor_points)
+        if runtime.acceleration_backend == "torch" and runtime.torch_geom is not None:
+            point_indices = list(range(len(outdoor_entries)))
+            los_hits, _los_sequence_hits = _torch_evaluate_state_hits_from_indices(
+                [_make_state("L", tx, None)],
+                point_indices,
+                runtime,
+                torch_state_chunk_size,
+                torch_point_chunk_size,
+                torch_edge_chunk_size,
+            )
+        else:
+            los_hits = [is_visible(tx, point, runtime.geom) for _, _, point in outdoor_entries]
+
+        remaining: list[tuple[int, int, Point]] = []
+        remaining_point_indices: list[int] = []
+        for index, (row, col, point) in enumerate(outdoor_entries):
+            if los_hits[index]:
+                visibility_order_grid[row][col] = 0
+                counts["los"] += 1
+                if sequence_hit_grids is not None:
+                    sequence_hit_grids["L"][row][col] = 1
+            else:
+                remaining.append((row, col, point))
+                remaining_point_indices.append(index)
+
+        for depth in range(1, max_interactions + 1):
+            states = states_by_order.get(depth, [])
+            sequence_groups = sequence_groups_by_order.get(depth, {})
+            if not states or not remaining:
+                continue
+
+            if runtime.acceleration_backend == "torch" and runtime.torch_geom is not None:
+                state_hits, sequence_hits = _torch_evaluate_state_hits_from_indices(
+                    states,
+                    remaining_point_indices,
+                    runtime,
+                    torch_state_chunk_size,
+                    torch_point_chunk_size,
+                    torch_edge_chunk_size,
+                )
+                if sequence_hit_grids is not None and sequence_groups:
+                    for sequence in sequence_groups:
+                        hits = sequence_hits.get(sequence)
+                        if hits is None:
+                            continue
+                        for index, (row, col, _point) in enumerate(remaining):
+                            if hits[index]:
+                                sequence_hit_grids[sequence][row][col] = 1
+
+                next_remaining: list[tuple[int, int, Point]] = []
+                next_remaining_indices: list[int] = []
+                for index, (row, col, point) in enumerate(remaining):
+                    if state_hits[index]:
+                        visibility_order_grid[row][col] = depth
+                        counts[f"order{depth}"] += 1
+                    else:
+                        next_remaining.append((row, col, point))
+                        next_remaining_indices.append(remaining_point_indices[index])
+                remaining = next_remaining
+                remaining_point_indices = next_remaining_indices
+                continue
+
+            if sequence_hit_grids is not None and sequence_groups:
+                for row, col, point in remaining:
+                    for sequence, grouped_states in sequence_groups.items():
+                        if any(_state_reaches_rx(state, point, runtime.geom) for state in grouped_states):
+                            sequence_hit_grids[sequence][row][col] = 1
+
+            next_remaining: list[tuple[int, int, Point]] = []
+            next_remaining_indices: list[int] = []
+            for index, (row, col, point) in enumerate(remaining):
+                if any(_state_reaches_rx(state, point, runtime.geom) for state in states):
+                    visibility_order_grid[row][col] = depth
+                    counts[f"order{depth}"] += 1
+                else:
+                    next_remaining.append((row, col, point))
+                    next_remaining_indices.append(remaining_point_indices[index])
+            remaining = next_remaining
+            remaining_point_indices = next_remaining_indices
+
+        counts["unreachable"] = len(remaining)
+        tx_result = {
+            "tx_id": tx_id,
+            "counts": counts,
+            "state_counts": {
+                f"order{depth}": len(states_by_order.get(depth, []))
+                for depth in range(1, max_interactions + 1)
+            },
+            "visibility_order_grid": visibility_order_grid,
+        }
+        if sequence_hit_grids is not None:
+            layered_grid, layered_counts = build_layered_sequence_render_grid(
+                sequence_hit_grids,
+                runtime.outdoor_mask,
+            )
+            tx_result["layered_sequence_grid"] = layered_grid
+            tx_result["layered_sequence_counts"] = layered_counts
+            if include_sequence_hit_grids:
+                tx_result["sequence_hit_grids"] = sequence_hit_grids
+        payload["tx_results"].append(tx_result)
+
+    return _export_rx_visibility_json(payload, output_path)
+
+
 def compute_rx_visibility(
     scene: dict[str, Any] | str | int,
     *,
@@ -947,6 +1352,29 @@ def compute_rx_visibility(
     torch_edge_chunk_size: int = 64,
     output_path: str | Path | None = None,
 ) -> dict[str, Any]:
+    runtime = build_rx_visibility_runtime(
+        scene,
+        root_dir=root_dir,
+        grid_step=grid_step,
+        bounds=bounds,
+        epsilon=epsilon,
+        acceleration_backend=acceleration_backend,
+        torch_device=torch_device,
+    )
+    return compute_rx_visibility_runtime(
+        runtime,
+        tx_ids=tx_ids,
+        max_interactions=max_interactions,
+        enable_reflection=enable_reflection,
+        enable_diffraction=enable_diffraction,
+        include_sequence_render_grid=include_sequence_render_grid,
+        include_sequence_hit_grids=include_sequence_hit_grids,
+        torch_state_chunk_size=torch_state_chunk_size,
+        torch_point_chunk_size=torch_point_chunk_size,
+        torch_edge_chunk_size=torch_edge_chunk_size,
+        output_path=output_path,
+    )
+
     if max_interactions < 0:
         raise ValueError("max_interactions must be >= 0.")
     if max_interactions > 4:
