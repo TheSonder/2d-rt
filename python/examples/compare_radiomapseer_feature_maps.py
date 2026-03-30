@@ -613,6 +613,17 @@ def main() -> None:
         help="Maximum interaction order for RT visibility expansion.",
     )
     parser.add_argument(
+        "--acceleration-backend",
+        choices=("cpu", "auto", "torch"),
+        default="cpu",
+        help="Backend used by compute_rx_visibility.",
+    )
+    parser.add_argument(
+        "--torch-device",
+        default=None,
+        help="Optional torch device, for example 'cuda' or 'cpu'.",
+    )
+    parser.add_argument(
         "--force-recompute",
         action="store_true",
         help="Ignore cached RX visibility payloads and recompute them.",
@@ -644,6 +655,8 @@ def main() -> None:
                 bounds=GRID_BOUNDS,
                 include_sequence_render_grid=True,
                 include_sequence_hit_grids=True,
+                acceleration_backend=args.acceleration_backend,
+                torch_device=args.torch_device,
                 output_path=cache_path,
             )
         else:

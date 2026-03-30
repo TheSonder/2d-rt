@@ -58,6 +58,149 @@ class SequenceCostConfig:
     max_cost: float = 170.0
 
 
+@dataclass(frozen=True)
+class TorchGeometryCache:
+    edge_a: Any
+    edge_b: Any
+    edge_bbox: Any
+    poly_edge_a: Any
+    poly_edge_b: Any
+    poly_edge_valid: Any
+    sample_step: float
+
+
+@dataclass(frozen=True)
+class TorchStateBatch:
+    source_points: Any
+    left_dirs: Any
+    right_dirs: Any
+    has_tube_dirs: Any
+    diffraction_mask: Any
+    source_poly_ids: Any
+    exclude_mask: Any
+    sequences: tuple[str, ...]
+
+
+def _import_torch() -> Any:
+    import torch
+
+    return torch
+
+
+def _resolve_acceleration_backend(
+    acceleration_backend: str,
+    torch_device: str | None,
+) -> tuple[str, str | None]:
+    backend = acceleration_backend.strip().lower()
+    if backend == "cpu":
+        return ("cpu", None)
+
+    torch = _import_torch()
+    if backend == "auto":
+        if torch.cuda.is_available():
+            return ("torch", torch_device or "cuda")
+        return ("cpu", None)
+
+    if backend == "torch":
+        if torch_device is not None:
+            return ("torch", torch_device)
+        if torch.cuda.is_available():
+            return ("torch", "cuda")
+        return ("torch", "cpu")
+
+    raise ValueError("acceleration_backend must be one of: 'cpu', 'auto', 'torch'.")
+
+
+def _build_torch_geometry_cache(
+    geom: GeometryIndex,
+    device: str,
+) -> TorchGeometryCache:
+    torch = _import_torch()
+    dtype = torch.float32
+
+    edge_a = torch.tensor([edge.a for edge in geom.edges], dtype=dtype, device=device)
+    edge_b = torch.tensor([edge.b for edge in geom.edges], dtype=dtype, device=device)
+    edge_bbox = torch.tensor([edge.bbox for edge in geom.edges], dtype=dtype, device=device)
+
+    max_poly_edges = max((len(polygon.vertex_ids) for polygon in geom.polygons), default=1)
+    poly_edge_a = torch.zeros((len(geom.polygons), max_poly_edges, 2), dtype=dtype, device=device)
+    poly_edge_b = torch.zeros((len(geom.polygons), max_poly_edges, 2), dtype=dtype, device=device)
+    poly_edge_valid = torch.zeros((len(geom.polygons), max_poly_edges), dtype=torch.bool, device=device)
+
+    for polygon in geom.polygons:
+        points = [geom.vertices[vertex_id].point for vertex_id in polygon.vertex_ids]
+        for local_id, point in enumerate(points):
+            nxt = points[(local_id + 1) % len(points)]
+            poly_edge_a[polygon.poly_id, local_id] = torch.tensor(point, dtype=dtype, device=device)
+            poly_edge_b[polygon.poly_id, local_id] = torch.tensor(nxt, dtype=dtype, device=device)
+            poly_edge_valid[polygon.poly_id, local_id] = True
+
+    span_x = geom.bounds[2] - geom.bounds[0]
+    span_y = geom.bounds[3] - geom.bounds[1]
+    sample_step = max(max(span_x, span_y) * 1.0e-4, geom.epsilon * 32.0, 1.0e-3)
+
+    return TorchGeometryCache(
+        edge_a=edge_a,
+        edge_b=edge_b,
+        edge_bbox=edge_bbox,
+        poly_edge_a=poly_edge_a,
+        poly_edge_b=poly_edge_b,
+        poly_edge_valid=poly_edge_valid,
+        sample_step=sample_step,
+    )
+
+
+def _prepare_torch_state_batch(
+    states: list[PropagationState],
+    edge_count: int,
+    device: str,
+) -> TorchStateBatch:
+    torch = _import_torch()
+    dtype = torch.float32
+
+    source_points = torch.tensor([state.source_point for state in states], dtype=dtype, device=device)
+    left_dirs = torch.tensor(
+        [state.left_dir if state.left_dir is not None else (0.0, 0.0) for state in states],
+        dtype=dtype,
+        device=device,
+    )
+    right_dirs = torch.tensor(
+        [state.right_dir if state.right_dir is not None else (0.0, 0.0) for state in states],
+        dtype=dtype,
+        device=device,
+    )
+    has_tube_dirs = torch.tensor(
+        [state.left_dir is not None and state.right_dir is not None for state in states],
+        dtype=torch.bool,
+        device=device,
+    )
+    diffraction_mask = torch.tensor(
+        [state.interaction_kind == "diffraction" and state.source_poly_id is not None for state in states],
+        dtype=torch.bool,
+        device=device,
+    )
+    source_poly_ids = torch.tensor(
+        [state.source_poly_id if state.source_poly_id is not None else 0 for state in states],
+        dtype=torch.int64,
+        device=device,
+    )
+    exclude_mask = torch.zeros((len(states), edge_count), dtype=torch.bool, device=device)
+    for state_id, state in enumerate(states):
+        if state.exclude_edge_ids:
+            exclude_mask[state_id, list(state.exclude_edge_ids)] = True
+
+    return TorchStateBatch(
+        source_points=source_points,
+        left_dirs=left_dirs,
+        right_dirs=right_dirs,
+        has_tube_dirs=has_tube_dirs,
+        diffraction_mask=diffraction_mask,
+        source_poly_ids=source_poly_ids,
+        exclude_mask=exclude_mask,
+        sequences=tuple(state.sequence for state in states),
+    )
+
+
 def _make_grid(height: int, width: int, value: int = 0) -> list[list[int]]:
     return [[value for _ in range(width)] for _ in range(height)]
 
@@ -138,6 +281,259 @@ def _dedupe_states(states: list[PropagationState], eps: float) -> list[Propagati
         seen.add(key)
         unique.append(state)
     return unique
+
+
+def _torch_cross(a: Any, b: Any) -> Any:
+    return a[..., 0] * b[..., 1] - a[..., 1] * b[..., 0]
+
+
+def _torch_point_on_segment(p: Any, a: Any, b: Any, eps: float) -> Any:
+    torch = _import_torch()
+    ab = b - a
+    ap = p - a
+    cross = torch.abs(_torch_cross(ab, ap)) <= eps
+    dot = (ap * ab).sum(dim=-1)
+    length_sq = (ab * ab).sum(dim=-1)
+    return cross & (dot >= -eps) & (dot <= length_sq + eps)
+
+
+def _torch_points_outside_polygons(
+    sample_points: Any,
+    poly_ids: Any,
+    torch_geom: TorchGeometryCache,
+    eps: float,
+) -> Any:
+    torch = _import_torch()
+    edge_a = torch_geom.poly_edge_a[poly_ids]
+    edge_b = torch_geom.poly_edge_b[poly_ids]
+    edge_valid = torch_geom.poly_edge_valid[poly_ids]
+
+    points = sample_points[:, :, None, :]
+    a = edge_a[:, None, :, :]
+    b = edge_b[:, None, :, :]
+    valid = edge_valid[:, None, :]
+
+    on_segment = _torch_point_on_segment(points, a, b, eps) & valid
+    on_edge = on_segment.any(dim=-1)
+
+    yi_above = a[..., 1] > points[..., 1]
+    yj_above = b[..., 1] > points[..., 1]
+    crosses = (yi_above != yj_above) & valid
+
+    denom = b[..., 1] - a[..., 1]
+    denom = torch.where(torch.abs(denom) <= eps, torch.ones_like(denom), denom)
+    x_cross = a[..., 0] + (points[..., 1] - a[..., 1]) * (b[..., 0] - a[..., 0]) / denom
+    toggles = crosses & (x_cross >= points[..., 0] - eps)
+    inside = (toggles.to(torch.int16).sum(dim=-1) % 2) == 1
+    return ~(on_edge | inside)
+
+
+def _torch_visibility_with_exclusions(
+    source_points: Any,
+    points: Any,
+    exclude_mask: Any,
+    torch_geom: TorchGeometryCache,
+    eps: float,
+    edge_chunk_size: int,
+) -> Any:
+    torch = _import_torch()
+    state_count = source_points.shape[0]
+    point_count = points.shape[0]
+    if state_count == 0 or point_count == 0:
+        return torch.zeros((state_count, point_count), dtype=torch.bool, device=source_points.device)
+
+    tx = source_points[:, None, :]
+    pts = points[None, :, :]
+    seg_min = torch.minimum(tx, pts)
+    seg_max = torch.maximum(tx, pts)
+    q = pts - tx
+    visible = torch.ones((state_count, point_count), dtype=torch.bool, device=source_points.device)
+    eps_sq = eps * eps
+
+    for edge_start in range(0, torch_geom.edge_a.shape[0], edge_chunk_size):
+        edge_stop = min(edge_start + edge_chunk_size, torch_geom.edge_a.shape[0])
+        a = torch_geom.edge_a[edge_start:edge_stop][None, None, :, :]
+        b = torch_geom.edge_b[edge_start:edge_stop][None, None, :, :]
+        bbox = torch_geom.edge_bbox[edge_start:edge_stop]
+        excluded = exclude_mask[:, None, edge_start:edge_stop]
+
+        bbox_ok = ~(
+            (seg_max[:, :, 0:1] < (bbox[None, None, :, 0] - eps))
+            | ((bbox[None, None, :, 2] + eps) < seg_min[:, :, 0:1])
+            | (seg_max[:, :, 1:2] < (bbox[None, None, :, 1] - eps))
+            | ((bbox[None, None, :, 3] + eps) < seg_min[:, :, 1:2])
+        )
+        if not bool(bbox_ok.any().item()):
+            continue
+
+        points_expanded = points[None, :, None, :]
+        source_expanded = source_points[:, None, None, :]
+        point_on_seg = _torch_point_on_segment(points_expanded, a, b, eps)
+        same_a = ((points_expanded - a) ** 2).sum(dim=-1) <= eps_sq
+        same_b = ((points_expanded - b) ** 2).sum(dim=-1) <= eps_sq
+
+        r0 = a - source_expanded
+        r1 = b - source_expanded
+        len_ok = ((r0 * r0).sum(dim=-1) > eps_sq) & ((r1 * r1).sum(dim=-1) > eps_sq)
+
+        cross_r = _torch_cross(r0, r1)
+        swap = cross_r < 0.0
+        a_ray = torch.where(swap[..., None], r1, r0)
+        b_ray = torch.where(swap[..., None], r0, r1)
+        q_expanded = q[:, :, None, :]
+        in_wedge = (_torch_cross(a_ray, q_expanded) >= -eps) & (_torch_cross(q_expanded, b_ray) >= -eps)
+
+        edge_vec = b - a
+        tx_side = _torch_cross(edge_vec, source_expanded - a)
+        point_side = _torch_cross(edge_vec, points_expanded - a)
+        blocked = (
+            bbox_ok
+            & (~excluded)
+            & len_ok
+            & (torch.abs(tx_side) > eps)
+            & in_wedge
+            & (~point_on_seg)
+            & (~same_a)
+            & (~same_b)
+            & ((tx_side * point_side) <= eps)
+        )
+        if bool(blocked.any().item()):
+            visible &= ~blocked.any(dim=-1)
+            if not bool(visible.any().item()):
+                break
+
+    return visible
+
+
+def _torch_state_chunk_reaches_points(
+    state_batch: TorchStateBatch,
+    point_tensor: Any,
+    torch_geom: TorchGeometryCache,
+    eps: float,
+    edge_chunk_size: int,
+) -> Any:
+    torch = _import_torch()
+    state_count = state_batch.source_points.shape[0]
+    point_count = point_tensor.shape[0]
+    if state_count == 0 or point_count == 0:
+        return torch.zeros((state_count, point_count), dtype=torch.bool, device=point_tensor.device)
+
+    q = point_tensor[None, :, :] - state_batch.source_points[:, None, :]
+    if bool(state_batch.has_tube_dirs.any().item()):
+        tube_ok = torch.ones((state_count, point_count), dtype=torch.bool, device=point_tensor.device)
+        masked_indices = torch.nonzero(state_batch.has_tube_dirs, as_tuple=False).flatten()
+        left_dirs = state_batch.left_dirs[masked_indices][:, None, :]
+        right_dirs = state_batch.right_dirs[masked_indices][:, None, :]
+        q_masked = q[masked_indices]
+        tube_ok_masked = (_torch_cross(left_dirs, q_masked) >= -eps) & (_torch_cross(q_masked, right_dirs) >= -eps)
+        tube_ok[masked_indices] = tube_ok_masked
+    else:
+        tube_ok = torch.ones((state_count, point_count), dtype=torch.bool, device=point_tensor.device)
+
+    departure_ok = torch.ones((state_count, point_count), dtype=torch.bool, device=point_tensor.device)
+    if bool(state_batch.diffraction_mask.any().item()):
+        diffraction_indices = torch.nonzero(state_batch.diffraction_mask, as_tuple=False).flatten()
+        q_diffraction = q[diffraction_indices]
+        lengths = torch.sqrt((q_diffraction * q_diffraction).sum(dim=-1))
+        unit = torch.zeros_like(q_diffraction)
+        valid = lengths > eps
+        unit[valid] = q_diffraction[valid] / lengths[valid][:, None]
+        sample = state_batch.source_points[diffraction_indices][:, None, :] + unit * torch_geom.sample_step
+        outside = _torch_points_outside_polygons(
+            sample,
+            state_batch.source_poly_ids[diffraction_indices],
+            torch_geom,
+            eps,
+        )
+        departure_ok_diffraction = outside & valid
+        departure_ok[diffraction_indices] = departure_ok_diffraction
+
+    prelim = tube_ok & departure_ok
+    if not bool(prelim.any().item()):
+        return prelim
+
+    visible = _torch_visibility_with_exclusions(
+        state_batch.source_points,
+        point_tensor,
+        state_batch.exclude_mask,
+        torch_geom,
+        eps,
+        edge_chunk_size,
+    )
+    return prelim & visible
+
+
+def _torch_evaluate_state_hits(
+    states: list[PropagationState],
+    points: list[Point],
+    torch_geom: TorchGeometryCache,
+    device: str,
+    eps: float,
+    state_chunk_size: int,
+    point_chunk_size: int,
+    edge_chunk_size: int,
+) -> tuple[list[bool], dict[str, list[bool]]]:
+    torch = _import_torch()
+    if not states or not points:
+        return ([False for _ in points], {})
+
+    with torch.no_grad():
+        point_tensor = torch.tensor(points, dtype=torch.float32, device=device)
+        state_batch = _prepare_torch_state_batch(states, torch_geom.edge_a.shape[0], device)
+        overall_hits: list[bool] = [False for _ in points]
+        sequence_hits: dict[str, list[bool]] = {sequence: [False for _ in points] for sequence in set(state_batch.sequences)}
+
+        for point_start in range(0, point_tensor.shape[0], point_chunk_size):
+            point_stop = min(point_start + point_chunk_size, point_tensor.shape[0])
+            chunk_points = point_tensor[point_start:point_stop]
+            chunk_overall = torch.zeros((chunk_points.shape[0],), dtype=torch.bool, device=device)
+            chunk_sequences = {
+                sequence: torch.zeros((chunk_points.shape[0],), dtype=torch.bool, device=device)
+                for sequence in sequence_hits
+            }
+
+            for state_start in range(0, state_batch.source_points.shape[0], state_chunk_size):
+                state_stop = min(state_start + state_chunk_size, state_batch.source_points.shape[0])
+                chunk_state_batch = TorchStateBatch(
+                    source_points=state_batch.source_points[state_start:state_stop],
+                    left_dirs=state_batch.left_dirs[state_start:state_stop],
+                    right_dirs=state_batch.right_dirs[state_start:state_stop],
+                    has_tube_dirs=state_batch.has_tube_dirs[state_start:state_stop],
+                    diffraction_mask=state_batch.diffraction_mask[state_start:state_stop],
+                    source_poly_ids=state_batch.source_poly_ids[state_start:state_stop],
+                    exclude_mask=state_batch.exclude_mask[state_start:state_stop],
+                    sequences=state_batch.sequences[state_start:state_stop],
+                )
+                hit_matrix = _torch_state_chunk_reaches_points(
+                    chunk_state_batch,
+                    chunk_points,
+                    torch_geom,
+                    eps,
+                    edge_chunk_size,
+                )
+                if hit_matrix.shape[0] == 0:
+                    continue
+
+                chunk_overall |= hit_matrix.any(dim=0)
+                local_sequences = sorted(set(chunk_state_batch.sequences))
+                for sequence in local_sequences:
+                    state_ids = [index for index, value in enumerate(chunk_state_batch.sequences) if value == sequence]
+                    if state_ids:
+                        chunk_sequences[sequence] |= hit_matrix[state_ids].any(dim=0)
+
+                if bool(chunk_overall.all().item()) and all(bool(value.all().item()) for value in chunk_sequences.values()):
+                    break
+
+            overall_cpu = chunk_overall.to("cpu").tolist()
+            for offset, value in enumerate(overall_cpu):
+                overall_hits[point_start + offset] = bool(value)
+
+            for sequence, hits in chunk_sequences.items():
+                hits_cpu = hits.to("cpu").tolist()
+                for offset, value in enumerate(hits_cpu):
+                    sequence_hits[sequence][point_start + offset] = bool(value)
+
+    return (overall_hits, sequence_hits)
 
 
 def _resolve_bounds(
@@ -544,6 +940,11 @@ def compute_rx_visibility(
     enable_diffraction: bool = True,
     include_sequence_render_grid: bool = False,
     include_sequence_hit_grids: bool = False,
+    acceleration_backend: str = "cpu",
+    torch_device: str | None = None,
+    torch_state_chunk_size: int = 16,
+    torch_point_chunk_size: int = 4096,
+    torch_edge_chunk_size: int = 64,
     output_path: str | Path | None = None,
 ) -> dict[str, Any]:
     if max_interactions < 0:
@@ -561,6 +962,15 @@ def compute_rx_visibility(
         scene_data = load_scene(scene, root_dir=root_dir)
 
     geom = build_geometry(scene_data, epsilon=epsilon)
+    resolved_backend, resolved_torch_device = _resolve_acceleration_backend(
+        acceleration_backend,
+        torch_device,
+    )
+    torch_geom = (
+        _build_torch_geometry_cache(geom, resolved_torch_device)
+        if resolved_backend == "torch" and resolved_torch_device is not None
+        else None
+    )
     indices = tx_ids if tx_ids is not None else list(range(len(scene_data["antenna"])))
     antenna_count = len(geom.antennas)
     for tx_id in indices:
@@ -663,14 +1073,45 @@ def compute_rx_visibility(
         for depth in range(1, max_interactions + 1):
             states = states_by_order.get(depth, [])
             sequence_groups = sequence_groups_by_order.get(depth, {})
+            if not states or not remaining:
+                continue
+
+            if resolved_backend == "torch" and torch_geom is not None:
+                remaining_points = [point for _, _, point in remaining]
+                state_hits, sequence_hits = _torch_evaluate_state_hits(
+                    states,
+                    remaining_points,
+                    torch_geom,
+                    resolved_torch_device,
+                    geom.epsilon,
+                    torch_state_chunk_size,
+                    torch_point_chunk_size,
+                    torch_edge_chunk_size,
+                )
+                if sequence_hit_grids is not None and sequence_groups:
+                    for sequence in sequence_groups:
+                        hits = sequence_hits.get(sequence)
+                        if hits is None:
+                            continue
+                        for index, (row, col, _point) in enumerate(remaining):
+                            if hits[index]:
+                                sequence_hit_grids[sequence][row][col] = 1
+
+                next_remaining: list[tuple[int, int, Point]] = []
+                for index, (row, col, point) in enumerate(remaining):
+                    if state_hits[index]:
+                        visibility_order_grid[row][col] = depth
+                        counts[f"order{depth}"] += 1
+                        continue
+                    next_remaining.append((row, col, point))
+                remaining = next_remaining
+                continue
+
             if sequence_hit_grids is not None and sequence_groups:
                 for row, col, point in remaining:
                     for sequence, grouped_states in sequence_groups.items():
                         if any(_state_reaches_rx(state, point, geom) for state in grouped_states):
                             sequence_hit_grids[sequence][row][col] = 1
-
-            if not states or not remaining:
-                continue
 
             next_remaining: list[tuple[int, int, Point]] = []
             for row, col, point in remaining:

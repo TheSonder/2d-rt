@@ -148,3 +148,8 @@
 - 当前对齐图中的第三栏已改为 `Best-partition`，显示的是分区结果本身；`Best-overlay` 和 `Energy-overlay` 只用于查看分区边界和 `gain` 真值纹理是否对齐。
 - 新增 `python/examples/evaluate_partition_batch.py`，支持按 `map` 范围和固定 `tx` 组批量评估 `partition` 候选在 `DPM / IRT2` 上的稳定性。
 - 新增 `docs/radiomapseer_partition_strategy.md`，整理当前 `RadioMapSeer partition` 对齐策略、覆盖原则、候选排列组合和评分口径，便于后续直接理解当前实验设定。
+- 为 `rt2d.compute_rx_visibility(...)` 新增可选的 `torch` 加速后端，当前保持原有算法和状态展开逻辑不变，只将 `state -> rx` reachability 判定改为基于 PyTorch 的分块批量计算。
+- 新增 `acceleration_backend / torch_device / torch_state_chunk_size / torch_point_chunk_size / torch_edge_chunk_size` 参数，用于控制 `compute_rx_visibility(...)` 的新后端。
+- 调整 `python/examples/compare_radiomapseer_feature_maps.py` 和 `python/examples/evaluate_partition_batch.py`，使其支持直接透传新的加速后端参数。
+- 新增 `tests/test_coverage.py` 中的 CPU / torch 后端等价性测试，使用 `torch_device='cpu'` 校验两种后端在小场景上的输出一致。
+- 在 `rt2d_env` 实测 `scene 0, tx 0, max_interactions=1, 256x256` 下，`cpu` 约 `69.7s`，`torch-cpu` 约 `25.4s`，`torch-cuda` 约 `16.7s`。

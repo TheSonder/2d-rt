@@ -27,6 +27,11 @@ def _evaluate_map(
     map_id: int,
     tx_ids: list[int],
     max_interactions: int,
+    acceleration_backend: str,
+    torch_device: str | None,
+    torch_state_chunk_size: int,
+    torch_point_chunk_size: int,
+    torch_edge_chunk_size: int,
 ) -> list[dict[str, Any]]:
     root = Path(radiomapseer_root)
     outdir = Path(output_dir)
@@ -46,6 +51,11 @@ def _evaluate_map(
             bounds=compare.GRID_BOUNDS,
             include_sequence_render_grid=True,
             include_sequence_hit_grids=True,
+            acceleration_backend=acceleration_backend,
+            torch_device=torch_device,
+            torch_state_chunk_size=torch_state_chunk_size,
+            torch_point_chunk_size=torch_point_chunk_size,
+            torch_edge_chunk_size=torch_edge_chunk_size,
             output_path=cache_path,
         )
 
@@ -157,14 +167,31 @@ def main() -> None:
         default=4,
         help="Number of worker processes.",
     )
+    parser.add_argument(
+        "--acceleration-backend",
+        choices=("cpu", "auto", "torch"),
+        default="cpu",
+        help="Backend used by compute_rx_visibility.",
+    )
+    parser.add_argument(
+        "--torch-device",
+        default=None,
+        help="Optional torch device, for example 'cuda' or 'cpu'.",
+    )
+    parser.add_argument("--torch-state-chunk-size", type=int, default=16)
+    parser.add_argument("--torch-point-chunk-size", type=int, default=4096)
+    parser.add_argument("--torch-edge-chunk-size", type=int, default=64)
     args = parser.parse_args()
 
     tx_ids = args.tx_ids or [0, 40]
     map_ids = list(range(args.map_start, args.map_end + 1))
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    max_workers = max(args.max_workers, 1)
+    if args.acceleration_backend != "cpu":
+        max_workers = 1
 
     all_rows: list[dict[str, Any]] = []
-    with ProcessPoolExecutor(max_workers=max(args.max_workers, 1)) as pool:
+    with ProcessPoolExecutor(max_workers=max_workers) as pool:
         future_map = {
             pool.submit(
                 _evaluate_map,
@@ -173,6 +200,11 @@ def main() -> None:
                 map_id,
                 tx_ids,
                 args.max_interactions,
+                args.acceleration_backend,
+                args.torch_device,
+                args.torch_state_chunk_size,
+                args.torch_point_chunk_size,
+                args.torch_edge_chunk_size,
             ): map_id
             for map_id in map_ids
         }

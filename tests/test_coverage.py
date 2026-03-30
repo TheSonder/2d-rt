@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import importlib.util
 import sys
 import unittest
 from pathlib import Path
@@ -24,6 +25,58 @@ def _label_at(payload: dict[str, object], tx_index: int, x: float, y: float) -> 
 
 
 class RxCoverageTests(unittest.TestCase):
+    def test_torch_backend_matches_cpu_on_small_scene(self) -> None:
+        if importlib.util.find_spec("torch") is None:
+            self.skipTest("torch not installed")
+
+        scene = {
+            "scene_id": "torch-compare",
+            "antenna": [[-2.0, 2.0]],
+            "polygons": [
+                [[0.0, 0.0], [2.0, 0.0], [2.0, 4.0], [0.0, 4.0], [0.0, 0.0]],
+                [[4.0, -1.0], [6.0, -1.0], [6.0, 5.0], [4.0, 5.0], [4.0, -1.0]],
+            ],
+        }
+
+        cpu_payload = rt2d.compute_rx_visibility(
+            scene,
+            tx_ids=[0],
+            max_interactions=2,
+            bounds=(-3.0, -2.0, 8.0, 7.0),
+            include_sequence_render_grid=True,
+            include_sequence_hit_grids=True,
+            acceleration_backend="cpu",
+        )
+
+        torch_payload = rt2d.compute_rx_visibility(
+            scene,
+            tx_ids=[0],
+            max_interactions=2,
+            bounds=(-3.0, -2.0, 8.0, 7.0),
+            include_sequence_render_grid=True,
+            include_sequence_hit_grids=True,
+            acceleration_backend="torch",
+            torch_device="cpu",
+            torch_state_chunk_size=4,
+            torch_point_chunk_size=64,
+            torch_edge_chunk_size=8,
+        )
+
+        self.assertEqual(cpu_payload["grid"], torch_payload["grid"])
+        self.assertEqual(cpu_payload["tx_results"][0]["counts"], torch_payload["tx_results"][0]["counts"])
+        self.assertEqual(
+            cpu_payload["tx_results"][0]["visibility_order_grid"],
+            torch_payload["tx_results"][0]["visibility_order_grid"],
+        )
+        self.assertEqual(
+            cpu_payload["tx_results"][0]["layered_sequence_grid"],
+            torch_payload["tx_results"][0]["layered_sequence_grid"],
+        )
+        self.assertEqual(
+            cpu_payload["tx_results"][0]["sequence_hit_grids"],
+            torch_payload["tx_results"][0]["sequence_hit_grids"],
+        )
+
     def test_layered_sequence_grid_prefers_first_order_reflection_over_first_order_diffraction(self) -> None:
         outdoor_mask = [[True]]
         sequence_hit_grids = {
