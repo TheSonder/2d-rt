@@ -125,6 +125,9 @@
 - 调整 `compare_radiomapseer_feature_maps.py` 的评分逻辑，加入覆盖中弱纹理的多阈值 `F1` 与 1 像素容忍匹配，并新增 `energy_capture` 指标。
 - 继续增强 `compare_radiomapseer_feature_maps.py` 的 `IRT2` 纹理提取，改为结合多尺度纹理响应与相对 `DPM` 的残差响应，并将 `IRT2` 可视化参考区域的默认阈值放宽到更能覆盖浅纹理的水平。
 - 将 `compare_radiomapseer_feature_maps.py` 的 `DPM` 参考提取重新独立出来，改为“边界梯度为主、局部细纹理为辅”的轻量响应，避免被 `IRT2 residual` 的浅纹理增强逻辑带偏。
+- 回退 `compare_radiomapseer_feature_maps.py` 中会额外制造伪边界的 contour 式 `Best-boundary` 生成逻辑，恢复为更接近第一版的离散邻接边界掩码；同时移除仅用于显示的平滑放大渲染，避免 `Best-boundary` 比参考纹理多出明显不存在的边界。
+- 继续收简 `compare_radiomapseer_feature_maps.py`：移除 `IRT2 residual` 参与纹理提取的逻辑，改为让 `DPM` 与 `IRT2` 共用同一套多尺度纹理提取器。
+- 将 `Best-boundary` 的生成方式改为“先求标签边界线段起点/终点，再按原图像素网格直接栅格化”，减少因掩码膨胀带来的伪边界，并让锯齿更贴近原始 `RadioMapSeer` 图像坐标。
 
 ### Breaking
 - 无兼容性影响。
@@ -135,3 +138,11 @@
 - 新版本会分别输出 `summary_dpm.csv` 和 `summary_irt2.csv`；如需看 `Best-overlay`，建议结合新的平滑 `Best-boundary` 与多阈值评分一起判断，不再只看最强纹理区域。
 - 新版 `IRT2` 面板额外包含 `IRT2-residual`，用于辅助判断哪些浅纹理是二阶新增结构，而不是直接沿用 `DPM` 的纹理。
 - `DPM` 与 `IRT2` 现在使用不同的参考纹理提取器；如果你在看 `Best-overlay`，不要再假设两者的红色参考区域来自同一套提取逻辑。
+- 如果你需要和第一版 `Best-boundary` 的视觉风格保持一致，现在优先参考当前版本导出的离散边界图，而不是此前中间版本的平滑 contour 图。
+- 当前版本的 `DPM` 对比已改为优先使用 `rt2d.extract_scene_boundaries(...)` 提供的真实 `LoS / Reflection` 线段，再直接栅格化到 `256x256` 图像网格；不再从 `coverage` 标签网格反推 `DPM Best-boundary`。
+- 当前版本已移除 `IRT2 residual` 参与纹理提取和出图，`DPM` 与 `IRT2` 重新统一为同一套多尺度纹理提取逻辑。
+- 当前版本已不再使用 `IRT2-residual` 参与纹理提取或出图；如需对比 `DPM` 与 `IRT2`，请直接查看统一口径下的 `DPM-texture` 与 `IRT2-texture`。
+- 当前对齐图中 `0..255` 的世界坐标直接对应 `256x256` 像素网格，因此 `1` 个世界单位约等于 `1px`；但为了贴近 `RadioMapSeer` 真值图中的视觉线宽，RT 线段当前按 `2px` 直接栅格化显示。
+- 将 `python/examples/compare_radiomapseer_feature_maps.py` 重写为只比较 `partition` 路线，不再混入 `tube / 真实边界线` 方案；当前脚本的核心问题改为“`RT` 栅格分区与 `DPM / IRT2 gain` 真值的对应好坏”。
+- 当前 `compare_radiomapseer_feature_maps.py` 中，`DPM` 候选包含 `minimal_order1 / layered_reflection / layered_diffraction / layered_full`，`IRT2` 候选包含 `minimal_order2 / layered_rr / layered_dd / layered_rd / layered_dr / layered_order2_* / energy_pruned_order2`。
+- 当前对齐图中的第三栏已改为 `Best-partition`，显示的是分区结果本身；`Best-overlay` 和 `Energy-overlay` 只用于查看分区边界和 `gain` 真值纹理是否对齐。

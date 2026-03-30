@@ -8,9 +8,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 
@@ -19,42 +16,48 @@ if str(PROJECT_PYTHON_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_PYTHON_ROOT))
 
 import rt2d
-from rt2d.coverage import (
-    SequenceCostConfig,
-    build_energy_pruned_sequence_render_grid,
-    build_layered_sequence_render_grid,
-)
+from rt2d.coverage import SequenceCostConfig, build_energy_pruned_sequence_render_grid
 
 GRID_BOUNDS = (0.0, 0.0, 255.0, 255.0)
 DEFAULT_SAMPLES = ["0:0", "0:1", "0:2"]
 REFERENCE_PERCENTILES = (60.0, 70.0, 80.0, 90.0, 95.0, 97.0)
+PARTITION_EDGE_WIDTH_PX = 2
+
+PARTITION_COLORS = {
+    "blocked": (17, 24, 39),
+    "unreachable": (15, 15, 15),
+    "L": (22, 163, 74),
+    "I1": (245, 158, 11),
+    "I2": (59, 130, 246),
+}
 
 
 @dataclass(frozen=True)
 class CandidateConfig:
     name: str
-    sequences: tuple[str, ...] | None
-    energy_pruned: bool = False
-    target: str = "generic"
+    target: str
+    mode: str
+    max_order: int = 0
+    sequences: tuple[str, ...] = ()
 
-DPM_CANDIDATE_CONFIGS = (
-    CandidateConfig("los_only", ("L",), target="dpm"),
-    CandidateConfig("order1_reflection", ("L", "R"), target="dpm"),
-    CandidateConfig("order1_diffraction", ("L", "D"), target="dpm"),
-    CandidateConfig("order1_reflection_diffraction", ("L", "R", "D"), target="dpm"),
+
+DPM_CANDIDATES = (
+    CandidateConfig("minimal_order1", "dpm", "minimal", max_order=1),
+    CandidateConfig("layered_reflection", "dpm", "layered", sequences=("L", "R")),
+    CandidateConfig("layered_diffraction", "dpm", "layered", sequences=("L", "D")),
+    CandidateConfig("layered_full", "dpm", "layered", sequences=("L", "R", "D")),
 )
 
-IRT2_CANDIDATE_CONFIGS = (
-    CandidateConfig("rr_only", ("RR",), target="irt2"),
-    CandidateConfig("dd_only", ("DD",), target="irt2"),
-    CandidateConfig("rd_only", ("RD",), target="irt2"),
-    CandidateConfig("dr_only", ("DR",), target="irt2"),
-    CandidateConfig("reflection_family_order2", ("RR", "RD", "DR"), target="irt2"),
-    CandidateConfig("diffraction_family_order2", ("DD", "RD", "DR"), target="irt2"),
-    CandidateConfig("order2_no_rr", ("RD", "DR", "DD"), target="irt2"),
-    CandidateConfig("order2_no_dd", ("RR", "RD", "DR"), target="irt2"),
-    CandidateConfig("order2_full", ("RR", "RD", "DR", "DD"), target="irt2"),
-    CandidateConfig("energy_pruned_order2", ("RR", "RD", "DR", "DD"), energy_pruned=True, target="irt2"),
+IRT2_CANDIDATES = (
+    CandidateConfig("minimal_order2", "irt2", "minimal", max_order=2),
+    CandidateConfig("layered_rr", "irt2", "layered", sequences=("RR",)),
+    CandidateConfig("layered_dd", "irt2", "layered", sequences=("DD",)),
+    CandidateConfig("layered_rd", "irt2", "layered", sequences=("RD",)),
+    CandidateConfig("layered_dr", "irt2", "layered", sequences=("DR",)),
+    CandidateConfig("layered_order2_no_rr", "irt2", "layered", sequences=("DD", "RD", "DR")),
+    CandidateConfig("layered_order2_no_dd", "irt2", "layered", sequences=("RR", "RD", "DR")),
+    CandidateConfig("layered_order2_full", "irt2", "layered", sequences=("RR", "DD", "RD", "DR")),
+    CandidateConfig("energy_pruned_order2", "irt2", "energy", sequences=("RR", "DD", "RD", "DR")),
 )
 
 
@@ -84,103 +87,12 @@ def _load_gray_image(path: Path) -> np.ndarray:
     return np.asarray(image, dtype=np.uint8)
 
 
-def _candidate_label_grid(
-    tx_result: dict[str, Any],
-    scene: dict[str, object],
-    tx_id: int,
-    candidate: CandidateConfig,
-    outdoor_mask: np.ndarray,
-    grid_meta: dict[str, Any],
-) -> list[list[str]]:
-    sequence_hit_grids = tx_result["sequence_hit_grids"]
-    outdoor_rows = outdoor_mask.tolist()
-
-    if candidate.energy_pruned:
-        label_grid, _counts = build_energy_pruned_sequence_render_grid(
-            sequence_hit_grids,
-            outdoor_rows,
-            (float(scene["antenna"][tx_id][0]), float(scene["antenna"][tx_id][1])),
-            grid_meta,
-            SequenceCostConfig(),
-        )
-        if candidate.sequences is None:
-            return label_grid
-        return [
-            [
-                label
-                if label == "blocked" or label in candidate.sequences
-                else "unreachable"
-                for label in row
-            ]
-            for row in label_grid
-        ]
-
-    restricted = {
-        sequence: sequence_hit_grids[sequence]
-        for sequence in candidate.sequences or ()
-        if sequence in sequence_hit_grids
-    }
-    label_grid, _counts = build_layered_sequence_render_grid(restricted, outdoor_rows)
-    return label_grid
-
-
-def _boundary_mask_from_label_grid(label_grid: list[list[str]], outdoor_mask: np.ndarray) -> np.ndarray:
-    labels = np.asarray(label_grid, dtype=object)
-    height, width = labels.shape
-    numeric = np.full((height, width), np.nan, dtype=np.float32)
-
-    valid_labels = sorted({str(label) for label in labels[outdoor_mask]})
-    label_to_index = {label: float(index) for index, label in enumerate(valid_labels)}
-    for label, index in label_to_index.items():
-        numeric[(labels == label) & outdoor_mask] = index
-
-    unique_values = sorted(label_to_index.values())
-    if len(unique_values) <= 1:
-        return np.zeros((height, width), dtype=bool)
-
-    fig, ax = plt.subplots(figsize=(1.0, 1.0))
-    contour = ax.contour(
-        numeric,
-        levels=[value + 0.5 for value in unique_values[:-1]],
-        linewidths=1.0,
-        corner_mask=False,
-    )
-    plt.close(fig)
-
-    scale = 4
-    highres = Image.new("L", (width * scale, height * scale), 0)
-    draw = ImageDraw.Draw(highres)
-
-    for level_segments in contour.allsegs:
-        for segment in level_segments:
-            if len(segment) < 2:
-                continue
-            points = [
-                (
-                    float(point[0]) * scale + scale * 0.5,
-                    float(point[1]) * scale + scale * 0.5,
-                )
-                for point in segment
-            ]
-            draw.line(points, fill=255, width=max(1, scale // 2))
-
-    highres_array = np.asarray(highres, dtype=np.uint8)
-    reduced = highres_array.reshape(height, scale, width, scale).max(axis=(1, 3))
-    return (reduced > 32) & outdoor_mask
-
-
-def _render_boundary_image(boundary_mask: np.ndarray) -> Image.Image:
-    scale = 4
-    image = Image.fromarray(boundary_mask.astype(np.uint8) * 255, mode="L")
-    image = image.resize(
-        (boundary_mask.shape[1] * scale, boundary_mask.shape[0] * scale),
-        Image.Resampling.BILINEAR,
-    )
-    image = image.resize(
-        (boundary_mask.shape[1], boundary_mask.shape[0]),
-        Image.Resampling.LANCZOS,
-    )
-    return image.convert("RGB")
+def _box_blur(image: np.ndarray, radius: int) -> np.ndarray:
+    if radius <= 0:
+        return image.astype(np.float32)
+    pil_image = Image.fromarray(np.clip(image * 255.0, 0.0, 255.0).astype(np.uint8), mode="L")
+    blurred = pil_image.filter(ImageFilter.BoxBlur(radius))
+    return np.asarray(blurred, dtype=np.float32) / 255.0
 
 
 def _gain_edge_strength(gain_image: np.ndarray, outdoor_mask: np.ndarray) -> np.ndarray:
@@ -202,95 +114,76 @@ def _gain_edge_strength(gain_image: np.ndarray, outdoor_mask: np.ndarray) -> np.
     return strength
 
 
-def _box_blur(image: np.ndarray, radius: int) -> np.ndarray:
-    if radius <= 0:
-        return image.astype(np.float32)
-    pil_image = Image.fromarray(np.clip(image * 255.0, 0.0, 255.0).astype(np.uint8), mode="L")
-    blurred = pil_image.filter(ImageFilter.BoxBlur(radius))
-    return np.asarray(blurred, dtype=np.float32) / 255.0
+def _radial_front_response(
+    gain_image: np.ndarray,
+    tx_point: tuple[float, float],
+    outdoor_mask: np.ndarray,
+) -> np.ndarray:
+    image = gain_image.astype(np.float32) / 255.0
+    height, width = image.shape
+    tx_x = float(tx_point[0])
+    tx_y = float(height - 1 - tx_point[1])
+
+    ys, xs = np.indices(image.shape, dtype=np.float32)
+    dx = xs - tx_x
+    dy = ys - tx_y
+    norm = np.hypot(dx, dy)
+    norm = np.where(norm < 1.0e-6, 1.0, norm)
+    ux = dx / norm
+    uy = dy / norm
+
+    inner_x = np.clip(np.rint(xs - ux).astype(np.int32), 0, width - 1)
+    inner_y = np.clip(np.rint(ys - uy).astype(np.int32), 0, height - 1)
+    outer_x = np.clip(np.rint(xs + ux).astype(np.int32), 0, width - 1)
+    outer_y = np.clip(np.rint(ys + uy).astype(np.int32), 0, height - 1)
+
+    response = np.abs(image[outer_y, outer_x] - image[inner_y, inner_x])
+    response *= outdoor_mask
+    return response.astype(np.float32)
 
 
 def _normalize_response(response: np.ndarray, mask: np.ndarray) -> np.ndarray:
     values = response[mask]
     if values.size == 0:
         return np.zeros(response.shape, dtype=np.float32)
-    high = float(np.percentile(values, 99.0))
+    high = float(np.percentile(values, 97.0))
     if high <= 1.0e-9:
         return np.zeros(response.shape, dtype=np.float32)
     return np.clip(response / high, 0.0, 1.0).astype(np.float32)
 
 
-def _texture_response(gain_image: np.ndarray, outdoor_mask: np.ndarray) -> np.ndarray:
+def _texture_response(
+    gain_image: np.ndarray,
+    outdoor_mask: np.ndarray,
+    tx_point: tuple[float, float],
+) -> np.ndarray:
     image = gain_image.astype(np.float32) / 255.0
     edge = _gain_edge_strength(gain_image, outdoor_mask)
     blur_1 = _box_blur(image, radius=1)
     blur_3 = _box_blur(image, radius=3)
     blur_6 = _box_blur(image, radius=6)
+    blur_12 = _box_blur(image, radius=12)
+    front_12 = _gain_edge_strength(
+        np.clip(blur_12 * 255.0, 0.0, 255.0).astype(np.uint8),
+        outdoor_mask,
+    )
     detail_1 = np.abs(image - blur_1)
     detail_3 = np.abs(image - blur_3)
     detail_6 = np.abs(image - blur_6)
+    detail_12 = np.abs(blur_3 - blur_12)
+    radial = _radial_front_response(gain_image, tx_point, outdoor_mask)
+
     combined = (
-        0.40 * edge
-        + 0.30 * detail_1
-        + 0.20 * detail_3
+        0.18 * edge
+        + 0.16 * front_12
+        + 0.16 * radial
+        + 0.16 * detail_1
+        + 0.14 * detail_3
         + 0.10 * detail_6
+        + 0.10 * detail_12
     )
     combined *= outdoor_mask
     return _normalize_response(combined, outdoor_mask)
-
-
-def _dpm_texture_strength(gain_image: np.ndarray, outdoor_mask: np.ndarray) -> np.ndarray:
-    image = gain_image.astype(np.float32) / 255.0
-    edge = _gain_edge_strength(gain_image, outdoor_mask)
-    blur_1 = _box_blur(image, radius=1)
-    detail_1 = np.abs(image - blur_1)
-    combined = (
-        0.80 * edge
-        + 0.20 * detail_1
-    )
-    combined *= outdoor_mask
-    return _normalize_response(combined, outdoor_mask)
-
-
-def _irt2_texture_strength(
-    irt2_image: np.ndarray,
-    dpm_image: np.ndarray,
-    outdoor_mask: np.ndarray,
-) -> np.ndarray:
-    irt2_base = _texture_response(irt2_image, outdoor_mask)
-    dpm_base = _texture_response(dpm_image, outdoor_mask)
-    irt2_norm = irt2_image.astype(np.float32) / 255.0
-    dpm_norm = dpm_image.astype(np.float32) / 255.0
-    residual_image = np.abs(irt2_norm - dpm_norm)
-    residual_texture = _texture_response(
-        np.clip(residual_image * 255.0, 0.0, 255.0).astype(np.uint8),
-        outdoor_mask,
-    )
-    residual_bonus = np.maximum(irt2_base - 0.55 * dpm_base, 0.0)
-    combined = (
-        0.50 * irt2_base
-        + 0.35 * residual_texture
-        + 0.15 * residual_bonus
-    )
-    combined *= outdoor_mask
-    return _normalize_response(combined, outdoor_mask)
-
-
-def _precision_recall_f1(pred_mask: np.ndarray, ref_mask: np.ndarray) -> tuple[float, float, float]:
-    pred_count = int(pred_mask.sum())
-    ref_count = int(ref_mask.sum())
-    if pred_count == 0 or ref_count == 0:
-        return 0.0, 0.0, 0.0
-
-    ref_dilated = _dilate_mask(ref_mask, radius=1)
-    pred_dilated = _dilate_mask(pred_mask, radius=1)
-    precision_hits = int(np.count_nonzero(pred_mask & ref_dilated))
-    recall_hits = int(np.count_nonzero(ref_mask & pred_dilated))
-    precision = precision_hits / pred_count
-    recall = recall_hits / ref_count
-    if precision + recall <= 0.0:
-        return precision, recall, 0.0
-    return precision, recall, (2.0 * precision * recall) / (precision + recall)
 
 
 def _dilate_mask(mask: np.ndarray, radius: int) -> np.ndarray:
@@ -311,7 +204,24 @@ def _dilate_mask(mask: np.ndarray, radius: int) -> np.ndarray:
     return result
 
 
-def _score_candidate_against_gain(
+def _precision_recall_f1(pred_mask: np.ndarray, ref_mask: np.ndarray) -> tuple[float, float, float]:
+    pred_count = int(pred_mask.sum())
+    ref_count = int(ref_mask.sum())
+    if pred_count == 0 or ref_count == 0:
+        return 0.0, 0.0, 0.0
+
+    ref_dilated = _dilate_mask(ref_mask, radius=1)
+    pred_dilated = _dilate_mask(pred_mask, radius=1)
+    precision_hits = int(np.count_nonzero(pred_mask & ref_dilated))
+    recall_hits = int(np.count_nonzero(ref_mask & pred_dilated))
+    precision = precision_hits / pred_count
+    recall = recall_hits / ref_count
+    if precision + recall <= 0.0:
+        return precision, recall, 0.0
+    return precision, recall, (2.0 * precision * recall) / (precision + recall)
+
+
+def _score_partition_against_gain(
     boundary_mask: np.ndarray,
     gain_strength: np.ndarray,
     scoring_mask: np.ndarray,
@@ -333,8 +243,7 @@ def _score_candidate_against_gain(
 
     if positive_scores.size == 0:
         for percentile in REFERENCE_PERCENTILES:
-            key = f"f1_p{int(percentile)}"
-            metrics[key] = 0.0
+            metrics[f"f1_p{int(percentile)}"] = 0.0
             metrics[f"precision_p{int(percentile)}"] = 0.0
             metrics[f"recall_p{int(percentile)}"] = 0.0
         metrics["f1_mean"] = 0.0
@@ -364,12 +273,35 @@ def _normalize_to_u8(image: np.ndarray) -> np.ndarray:
     return scaled.astype(np.uint8)
 
 
+def _reference_mask(
+    gain_strength: np.ndarray,
+    scoring_mask: np.ndarray,
+    percentile: float = 85.0,
+) -> np.ndarray:
+    positive_scores = gain_strength[scoring_mask & (gain_strength > 0.0)]
+    if positive_scores.size == 0:
+        return np.zeros(gain_strength.shape, dtype=bool)
+    threshold = float(np.percentile(positive_scores, percentile))
+    return scoring_mask & (gain_strength >= threshold) & (gain_strength > 0.0)
+
+
 def _overlay_mask(base_gray: np.ndarray, ref_mask: np.ndarray, pred_mask: np.ndarray) -> Image.Image:
     rgb = np.stack([base_gray, base_gray, base_gray], axis=-1).astype(np.uint8)
     rgb[ref_mask] = np.array([255, 64, 64], dtype=np.uint8)
     rgb[pred_mask] = np.array([64, 224, 208], dtype=np.uint8)
     rgb[ref_mask & pred_mask] = np.array([255, 214, 10], dtype=np.uint8)
     return Image.fromarray(rgb, mode="RGB")
+
+
+def _grouped_grid_to_image(grouped_grid: list[list[str]]) -> Image.Image:
+    height = len(grouped_grid)
+    width = len(grouped_grid[0]) if height else 0
+    image = Image.new("RGB", (width, height), PARTITION_COLORS["blocked"])
+    pixels = image.load()
+    for row in range(height):
+        for col in range(width):
+            pixels[col, row] = PARTITION_COLORS[grouped_grid[row][col]]
+    return image
 
 
 def _tile_images_with_titles(
@@ -400,6 +332,7 @@ def _write_summary_csv(rows: list[dict[str, object]], output_path: Path) -> None
         "sample",
         "target",
         "candidate",
+        "mode",
         "f1_mean",
         "edge_lift",
         "energy_capture",
@@ -414,16 +347,192 @@ def _write_summary_csv(rows: list[dict[str, object]], output_path: Path) -> None
             writer.writerow(row)
 
 
-def _reference_mask(
-    gain_strength: np.ndarray,
-    scoring_mask: np.ndarray,
-    percentile: float = 90.0,
+def _group_from_minimal_grid(
+    visibility_order_grid: list[list[int]],
+    target: str,
+    max_order: int,
+) -> list[list[str]]:
+    grouped: list[list[str]] = []
+    for row in visibility_order_grid:
+        grouped_row: list[str] = []
+        for value in row:
+            label = int(value)
+            if label == -2:
+                grouped_row.append("blocked")
+            elif label == -1:
+                grouped_row.append("unreachable")
+            elif label == 0:
+                grouped_row.append("L")
+            elif label == 1 and max_order >= 1:
+                grouped_row.append("I1")
+            elif label == 2 and target == "irt2" and max_order >= 2:
+                grouped_row.append("I2")
+            else:
+                grouped_row.append("unreachable")
+        grouped.append(grouped_row)
+    return grouped
+
+
+def _group_from_layered_grid(
+    layered_grid: list[list[str]],
+    target: str,
+    included_sequences: set[str],
+) -> list[list[str]]:
+    grouped: list[list[str]] = []
+    for row in layered_grid:
+        grouped_row: list[str] = []
+        for label in row:
+            raw = str(label)
+            if raw in {"blocked", "unreachable"}:
+                grouped_row.append(raw)
+                continue
+            if raw == "L":
+                grouped_row.append("L")
+                continue
+            if len(raw) == 1 and set(raw) <= {"R", "D"}:
+                if target == "dpm" and raw in included_sequences:
+                    grouped_row.append("I1")
+                elif target == "irt2":
+                    grouped_row.append("I1")
+                else:
+                    grouped_row.append("unreachable")
+                continue
+            if len(raw) == 2 and set(raw) <= {"R", "D"}:
+                if target == "irt2" and raw in included_sequences:
+                    grouped_row.append("I2")
+                else:
+                    grouped_row.append("unreachable")
+                continue
+            grouped_row.append("unreachable")
+        grouped.append(grouped_row)
+    return grouped
+
+
+def _group_from_energy_grid(
+    tx_result: dict[str, Any],
+    scene: dict[str, object],
+    tx_id: int,
+    outdoor_mask: np.ndarray,
+    grid_meta: dict[str, Any],
+    included_sequences: set[str],
+) -> list[list[str]]:
+    tx_point = (
+        float(scene["antenna"][tx_id][0]),
+        float(scene["antenna"][tx_id][1]),
+    )
+    pruned_grid, _counts = build_energy_pruned_sequence_render_grid(
+        tx_result["sequence_hit_grids"],
+        outdoor_mask.tolist(),
+        tx_point,
+        grid_meta,
+        SequenceCostConfig(),
+    )
+    return _group_from_layered_grid(pruned_grid, "irt2", included_sequences)
+
+
+def _candidate_partition_grid(
+    candidate: CandidateConfig,
+    tx_result: dict[str, Any],
+    scene: dict[str, object],
+    tx_id: int,
+    outdoor_mask: np.ndarray,
+    grid_meta: dict[str, Any],
+) -> list[list[str]]:
+    if candidate.mode == "minimal":
+        return _group_from_minimal_grid(
+            tx_result["visibility_order_grid"],
+            candidate.target,
+            candidate.max_order,
+        )
+    if candidate.mode == "layered":
+        return _group_from_layered_grid(
+            tx_result["layered_sequence_grid"],
+            candidate.target,
+            set(candidate.sequences),
+        )
+    if candidate.mode == "energy":
+        return _group_from_energy_grid(
+            tx_result,
+            scene,
+            tx_id,
+            outdoor_mask,
+            grid_meta,
+            set(candidate.sequences),
+        )
+    raise ValueError(f"unsupported mode: {candidate.mode}")
+
+
+def _boundary_segments_from_label_grid(
+    label_grid: list[list[str]],
+    outdoor_mask: np.ndarray,
+) -> list[tuple[tuple[int, int], tuple[int, int]]]:
+    labels = np.asarray(label_grid, dtype=object)
+    height, width = labels.shape
+    segments: list[tuple[tuple[int, int], tuple[int, int]]] = []
+
+    valid_h = outdoor_mask[:, :-1] & outdoor_mask[:, 1:]
+    diff_h = valid_h & (labels[:, :-1] != labels[:, 1:])
+    for col in range(width - 1):
+        row = 0
+        while row < height:
+            if not diff_h[row, col]:
+                row += 1
+                continue
+            start_row = row
+            while row + 1 < height and diff_h[row + 1, col]:
+                row += 1
+            end_row = row
+            x = col + 1
+            y0 = start_row
+            y1 = min(end_row + 1, height - 1)
+            segments.append(((x, y0), (x, y1)))
+            row += 1
+
+    valid_v = outdoor_mask[:-1, :] & outdoor_mask[1:, :]
+    diff_v = valid_v & (labels[:-1, :] != labels[1:, :])
+    for row in range(height - 1):
+        col = 0
+        while col < width:
+            if not diff_v[row, col]:
+                col += 1
+                continue
+            start_col = col
+            while col + 1 < width and diff_v[row, col + 1]:
+                col += 1
+            end_col = col
+            y = row + 1
+            x0 = start_col
+            x1 = min(end_col + 1, width - 1)
+            segments.append(((x0, y), (x1, y)))
+            col += 1
+
+    return segments
+
+
+def _rasterize_boundary_segments(
+    segments: list[tuple[tuple[int, int], tuple[int, int]]],
+    shape: tuple[int, int],
 ) -> np.ndarray:
-    positive_scores = gain_strength[scoring_mask & (gain_strength > 0.0)]
-    if positive_scores.size == 0:
-        return np.zeros(gain_strength.shape, dtype=bool)
-    threshold = float(np.percentile(positive_scores, percentile))
-    return scoring_mask & (gain_strength >= threshold) & (gain_strength > 0.0)
+    height, width = shape
+    image = Image.new("L", (width, height), 0)
+    draw = ImageDraw.Draw(image)
+    for (x0, y0), (x1, y1) in segments:
+        draw.line(
+            (
+                max(0, min(width - 1, x0)),
+                max(0, min(height - 1, y0)),
+                max(0, min(width - 1, x1)),
+                max(0, min(height - 1, y1)),
+            ),
+            fill=255,
+            width=PARTITION_EDGE_WIDTH_PX,
+        )
+    return np.asarray(image, dtype=np.uint8) > 0
+
+
+def _boundary_mask_from_label_grid(label_grid: list[list[str]], outdoor_mask: np.ndarray) -> np.ndarray:
+    segments = _boundary_segments_from_label_grid(label_grid, outdoor_mask)
+    return _rasterize_boundary_segments(segments, outdoor_mask.shape) & outdoor_mask
 
 
 def _evaluate_candidates(
@@ -436,27 +545,30 @@ def _evaluate_candidates(
     gain_strength: np.ndarray,
     scoring_mask: np.ndarray,
     sample_name: str,
-) -> tuple[list[dict[str, object]], dict[str, np.ndarray]]:
+) -> tuple[list[dict[str, object]], dict[str, list[list[str]]], dict[str, np.ndarray]]:
     ranking: list[dict[str, object]] = []
-    candidate_masks: dict[str, np.ndarray] = {}
+    grouped_grids: dict[str, list[list[str]]] = {}
+    boundary_masks: dict[str, np.ndarray] = {}
 
     for candidate in candidates:
-        label_grid = _candidate_label_grid(
+        grouped_grid = _candidate_partition_grid(
+            candidate,
             tx_result,
             scene,
             tx_id,
-            candidate,
             outdoor_mask,
             grid_meta,
         )
-        boundary_mask = _boundary_mask_from_label_grid(label_grid, outdoor_mask)
-        candidate_masks[candidate.name] = boundary_mask
-        metrics = _score_candidate_against_gain(boundary_mask, gain_strength, scoring_mask)
+        boundary_mask = _boundary_mask_from_label_grid(grouped_grid, outdoor_mask)
+        grouped_grids[candidate.name] = grouped_grid
+        boundary_masks[candidate.name] = boundary_mask
+        metrics = _score_partition_against_gain(boundary_mask, gain_strength, scoring_mask)
         ranking.append(
             {
                 "sample": sample_name,
                 "target": candidate.target,
                 "candidate": candidate.name,
+                "mode": candidate.mode,
                 "metrics": metrics,
             }
         )
@@ -469,12 +581,12 @@ def _evaluate_candidates(
         ),
         reverse=True,
     )
-    return ranking, candidate_masks
+    return ranking, grouped_grids, boundary_masks
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Compare RT-derived feature boundary maps against RadioMapSeer gain textures."
+        description="Compare RT partition renders against RadioMapSeer DPM / IRT2 gain maps."
     )
     parser.add_argument(
         "--radiomapseer-root",
@@ -485,7 +597,7 @@ def main() -> None:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("build") / "radiomapseer_feature_compare",
+        default=Path("build") / "radiomapseer_partition_compare",
         help="Directory for comparison outputs.",
     )
     parser.add_argument(
@@ -514,8 +626,8 @@ def main() -> None:
     image_dir.mkdir(parents=True, exist_ok=True)
 
     sample_pairs = [_parse_sample(value) for value in args.samples]
-    dpm_summary_rows: list[dict[str, object]] = []
-    irt2_summary_rows: list[dict[str, object]] = []
+    dpm_rows: list[dict[str, object]] = []
+    irt2_rows: list[dict[str, object]] = []
     sample_results: list[dict[str, object]] = []
 
     for map_id, tx_id in sample_pairs:
@@ -538,41 +650,41 @@ def main() -> None:
             payload = json.loads(cache_path.read_text(encoding="utf-8"))
 
         tx_result = payload["tx_results"][0]
-        payload_outdoor = np.asarray(
+        outdoor_mask = np.asarray(
             [[label != "blocked" for label in row] for row in tx_result["layered_sequence_grid"]],
             dtype=bool,
         )
         building_mask = _load_gray_image(
             args.radiomapseer_root / "png" / "buildings_complete" / f"{map_id}.png"
         ) > 0
-        scoring_mask = payload_outdoor & (~building_mask)
+        scoring_mask = outdoor_mask & (~building_mask)
+        tx_point = (
+            float(scene["antenna"][tx_id][0]),
+            float(scene["antenna"][tx_id][1]),
+        )
 
         dpm_image = _load_gray_image(args.radiomapseer_root / "gain" / "DPM" / f"{sample_name}.png")
         irt2_image = _load_gray_image(args.radiomapseer_root / "gain" / "IRT2" / f"{sample_name}.png")
-        dpm_strength = _dpm_texture_strength(dpm_image, scoring_mask)
-        irt2_strength = _irt2_texture_strength(irt2_image, dpm_image, scoring_mask)
-        irt2_residual_image = np.clip(
-            np.abs(irt2_image.astype(np.int16) - dpm_image.astype(np.int16)),
-            0,
-            255,
-        ).astype(np.uint8)
-        dpm_ranking, dpm_masks = _evaluate_candidates(
-            DPM_CANDIDATE_CONFIGS,
+        dpm_strength = _texture_response(dpm_image, scoring_mask, tx_point)
+        irt2_strength = _texture_response(irt2_image, scoring_mask, tx_point)
+
+        dpm_ranking, dpm_grouped, dpm_boundaries = _evaluate_candidates(
+            DPM_CANDIDATES,
             tx_result,
             scene,
             tx_id,
-            payload_outdoor,
+            outdoor_mask,
             payload["grid"],
             dpm_strength,
             scoring_mask,
             sample_name,
         )
-        irt2_ranking, irt2_masks = _evaluate_candidates(
-            IRT2_CANDIDATE_CONFIGS,
+        irt2_ranking, irt2_grouped, irt2_boundaries = _evaluate_candidates(
+            IRT2_CANDIDATES,
             tx_result,
             scene,
             tx_id,
-            payload_outdoor,
+            outdoor_mask,
             payload["grid"],
             irt2_strength,
             scoring_mask,
@@ -584,6 +696,7 @@ def main() -> None:
                 "sample": sample_name,
                 "target": "dpm",
                 "candidate": item["candidate"],
+                "mode": item["mode"],
                 "f1_mean": f"{item['metrics']['f1_mean']:.6f}",
                 "edge_lift": f"{item['metrics']['edge_lift']:.6f}",
                 "energy_capture": f"{item['metrics']['energy_capture']:.6f}",
@@ -591,13 +704,14 @@ def main() -> None:
             }
             for percentile in REFERENCE_PERCENTILES:
                 row[f"f1_p{int(percentile)}"] = f"{item['metrics'][f'f1_p{int(percentile)}']:.6f}"
-            dpm_summary_rows.append(row)
+            dpm_rows.append(row)
 
         for item in irt2_ranking:
             row = {
                 "sample": sample_name,
                 "target": "irt2",
                 "candidate": item["candidate"],
+                "mode": item["mode"],
                 "f1_mean": f"{item['metrics']['f1_mean']:.6f}",
                 "edge_lift": f"{item['metrics']['edge_lift']:.6f}",
                 "energy_capture": f"{item['metrics']['energy_capture']:.6f}",
@@ -605,29 +719,28 @@ def main() -> None:
             }
             for percentile in REFERENCE_PERCENTILES:
                 row[f"f1_p{int(percentile)}"] = f"{item['metrics'][f'f1_p{int(percentile)}']:.6f}"
-            irt2_summary_rows.append(row)
+            irt2_rows.append(row)
 
         dpm_best = dpm_ranking[0]
         irt2_best = irt2_ranking[0]
         irt2_current = next(item for item in irt2_ranking if item["candidate"] == "energy_pruned_order2")
-        dpm_ref = _reference_mask(dpm_strength, scoring_mask, percentile=90.0)
-        irt2_ref = _reference_mask(irt2_strength, scoring_mask, percentile=80.0)
+        dpm_ref = _reference_mask(dpm_strength, scoring_mask, percentile=85.0)
+        irt2_ref = _reference_mask(irt2_strength, scoring_mask, percentile=85.0)
 
         dpm_panel = [
             ("DPM", Image.fromarray(dpm_image, mode="L").convert("RGB")),
             ("DPM-texture", Image.fromarray(_normalize_to_u8(dpm_strength), mode="L").convert("RGB")),
-            ("Best-boundary", _render_boundary_image(dpm_masks[str(dpm_best["candidate"])])),
-            ("Best-overlay", _overlay_mask(dpm_image, dpm_ref, dpm_masks[str(dpm_best["candidate"])])),
+            ("Best-partition", _grouped_grid_to_image(dpm_grouped[str(dpm_best["candidate"])])),
+            ("Best-overlay", _overlay_mask(dpm_image, dpm_ref, dpm_boundaries[str(dpm_best["candidate"])])),
         ]
         _tile_images_with_titles(dpm_panel, image_dir / f"{sample_name}_dpm_compare.png")
 
         irt2_panel = [
             ("IRT2", Image.fromarray(irt2_image, mode="L").convert("RGB")),
             ("IRT2-texture", Image.fromarray(_normalize_to_u8(irt2_strength), mode="L").convert("RGB")),
-            ("IRT2-residual", Image.fromarray(irt2_residual_image, mode="L").convert("RGB")),
-            ("Best-boundary", _render_boundary_image(irt2_masks[str(irt2_best["candidate"])])),
-            ("Best-overlay", _overlay_mask(irt2_image, irt2_ref, irt2_masks[str(irt2_best["candidate"])])),
-            ("Energy-overlay", _overlay_mask(irt2_image, irt2_ref, irt2_masks[str(irt2_current["candidate"])])),
+            ("Best-partition", _grouped_grid_to_image(irt2_grouped[str(irt2_best["candidate"])])),
+            ("Best-overlay", _overlay_mask(irt2_image, irt2_ref, irt2_boundaries[str(irt2_best["candidate"])])),
+            ("Energy-overlay", _overlay_mask(irt2_image, irt2_ref, irt2_boundaries[str(irt2_current["candidate"])])),
         ]
         _tile_images_with_titles(irt2_panel, image_dir / f"{sample_name}_irt2_compare.png")
 
@@ -657,22 +770,26 @@ def main() -> None:
             f"energy_capture={irt2_current['metrics']['energy_capture']:.4f}"
         )
 
-    result_payload = {
-        "samples": sample_results,
-        "dpm_candidate_order": [candidate.name for candidate in DPM_CANDIDATE_CONFIGS],
-        "irt2_candidate_order": [candidate.name for candidate in IRT2_CANDIDATE_CONFIGS],
-        "reference_percentiles": list(REFERENCE_PERCENTILES),
-        "max_interactions": args.max_interactions,
-    }
     summary_json_path = args.output_dir / "summary.json"
     summary_json_path.write_text(
-        json.dumps(result_payload, indent=2, ensure_ascii=False),
+        json.dumps(
+            {
+                "samples": sample_results,
+                "dpm_candidate_order": [candidate.name for candidate in DPM_CANDIDATES],
+                "irt2_candidate_order": [candidate.name for candidate in IRT2_CANDIDATES],
+                "reference_percentiles": list(REFERENCE_PERCENTILES),
+                "max_interactions": args.max_interactions,
+            },
+            indent=2,
+            ensure_ascii=False,
+        ),
         encoding="utf-8",
     )
+
     dpm_summary_csv = args.output_dir / "summary_dpm.csv"
     irt2_summary_csv = args.output_dir / "summary_irt2.csv"
-    _write_summary_csv(dpm_summary_rows, dpm_summary_csv)
-    _write_summary_csv(irt2_summary_rows, irt2_summary_csv)
+    _write_summary_csv(dpm_rows, dpm_summary_csv)
+    _write_summary_csv(irt2_rows, irt2_summary_csv)
 
     print(f"summary_json: {summary_json_path}")
     print(f"summary_dpm_csv: {dpm_summary_csv}")
