@@ -2,8 +2,11 @@
 
 import importlib.util
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+
+from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python"))
@@ -26,12 +29,35 @@ def _label_at(payload: dict[str, object], tx_index: int, x: float, y: float) -> 
 
 
 class RxCoverageTests(unittest.TestCase):
-    def test_path_family_los_r_partition_runs_on_small_scene(self) -> None:
+    def test_runtime_prefers_building_mask_png_when_provided(self) -> None:
+        scene = {
+            "scene_id": "runtime-mask",
+            "antenna": [[0.0, 0.0]],
+            "polygons": [],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mask_path = Path(tmpdir) / "building_mask.png"
+            image = Image.new("L", (3, 3), 0)
+            image.putpixel((1, 1), 255)
+            image.save(mask_path)
+            scene["building_mask_path"] = str(mask_path)
+
+            runtime = rt2d.build_rx_visibility_runtime(
+                scene,
+                bounds=(0.0, 0.0, 2.0, 2.0),
+                acceleration_backend="cpu",
+            )
+
+            self.assertEqual(runtime.outdoor_mask_source, "building_png")
+            self.assertFalse(runtime.outdoor_mask[1][1])
+            self.assertTrue(runtime.outdoor_mask[0][0])
+
+    def test_path_family_los_r_d_partition_runs_on_small_scene(self) -> None:
         scene = {
             "scene_id": "path-family-preview",
-            "antenna": [[-2.0, 2.0]],
+            "antenna": [[-2.0, 1.0]],
             "polygons": [
-                [[0.0, 0.0], [2.0, 0.0], [2.0, 4.0], [0.0, 4.0], [0.0, 0.0]],
+                [[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0], [0.0, 0.0]],
             ],
         }
 
@@ -45,7 +71,30 @@ class RxCoverageTests(unittest.TestCase):
 
         labels = {label for row in payload["partition_grid"] for label in row}
         self.assertIn("L", labels)
-        self.assertTrue(labels.issubset({"blocked", "unreachable", "L", "R"}))
+        self.assertIn("D", labels)
+        self.assertTrue(labels.issubset({"blocked", "unreachable", "L", "R", "D"}))
+
+    def test_path_family_runtime_uses_radio_map_building_png_when_available(self) -> None:
+        root = Path(r"D:\TheSonder\0.8 Resources\data\RadioMapSeer")
+        if not (root / "png" / "buildings_complete" / "0.png").is_file():
+            self.skipTest("RadioMapSeer buildings_complete png not available")
+
+        scene = {
+            "scene_id": "0",
+            "root_dir": str(root),
+            "antenna_path": str(root / "antenna" / "0.json"),
+            "polygon_path": str(root / "polygon" / "buildings_complete" / "0.json"),
+            "antenna": [[108.0, 68.0]],
+            "polygons": [],
+            "building_mask_path": str(root / "png" / "buildings_complete" / "0.png"),
+        }
+        runtime = build_path_family_runtime(
+            scene,
+            tx_id=0,
+            bounds=(0.0, 0.0, 255.0, 255.0),
+            acceleration_backend="cpu",
+        )
+        self.assertEqual(runtime.rx_runtime.outdoor_mask_source, "building_png")
 
     def test_runtime_builder_matches_direct_compute_on_small_scene(self) -> None:
         scene = {

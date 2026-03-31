@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from PIL import Image
+
 from .boundary import (
     GeometryIndex,
     Point,
@@ -91,6 +93,8 @@ class RxVisibilityRuntime:
     outdoor_mask: list[list[bool]]
     outdoor_points: tuple[tuple[int, int, Point], ...]
     outdoor_point_lookup: dict[tuple[int, int], int]
+    building_mask_path: str | None
+    outdoor_mask_source: str
     acceleration_backend: str
     torch_device: str | None
     torch_geom: TorchGeometryCache | None = None
@@ -196,6 +200,52 @@ def _build_outdoor_mask_and_points(
     return (outdoor_mask, tuple(outdoor_points), outdoor_point_lookup)
 
 
+def _resolve_building_mask_path(scene_data: dict[str, Any]) -> Path | None:
+    explicit = scene_data.get("building_mask_path")
+    if explicit is not None:
+        path = Path(str(explicit))
+        if path.is_file():
+            return path
+
+    root_dir = scene_data.get("root_dir")
+    scene_id = str(scene_data.get("scene_id", "")).strip()
+    if root_dir and scene_id:
+        candidate = Path(str(root_dir)) / "png" / "buildings_complete" / f"{scene_id}.png"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _build_outdoor_mask_from_building_png(
+    x_coords: list[float],
+    y_coords: list[float],
+    building_mask_path: Path,
+) -> tuple[list[list[bool]], tuple[tuple[int, int, Point], ...], dict[tuple[int, int], int]]:
+    image = Image.open(building_mask_path).convert("L")
+    mask = image.load()
+    width, height = image.size
+
+    outdoor_mask: list[list[bool]] = []
+    outdoor_points: list[tuple[int, int, Point]] = []
+    outdoor_point_lookup: dict[tuple[int, int], int] = {}
+
+    for row, y in enumerate(y_coords):
+        mask_row: list[bool] = []
+        for col, x in enumerate(x_coords):
+            px = int(round(float(x)))
+            py = int(round(float(height - 1 - y)))
+            is_outdoor = True
+            if 0 <= px < width and 0 <= py < height:
+                is_outdoor = int(mask[px, py]) == 0
+            mask_row.append(is_outdoor)
+            if is_outdoor:
+                outdoor_point_lookup[(row, col)] = len(outdoor_points)
+                outdoor_points.append((row, col, (x, y)))
+        outdoor_mask.append(mask_row)
+
+    return (outdoor_mask, tuple(outdoor_points), outdoor_point_lookup)
+
+
 def _prepare_torch_state_batch(
     states: list[PropagationState],
     edge_count: int,
@@ -274,11 +324,21 @@ def build_rx_visibility_runtime(
     min_x, min_y, max_x, max_y = _resolve_bounds(geom, bounds, grid_step)
     x_coords = _build_axis(min_x, max_x, grid_step)
     y_coords = list(reversed(_build_axis(min_y, max_y, grid_step)))
-    outdoor_mask, outdoor_points, outdoor_point_lookup = _build_outdoor_mask_and_points(
-        x_coords,
-        y_coords,
-        geom,
-    )
+    building_mask_path = _resolve_building_mask_path(scene_data)
+    if building_mask_path is not None:
+        outdoor_mask, outdoor_points, outdoor_point_lookup = _build_outdoor_mask_from_building_png(
+            x_coords,
+            y_coords,
+            building_mask_path,
+        )
+        outdoor_mask_source = "building_png"
+    else:
+        outdoor_mask, outdoor_points, outdoor_point_lookup = _build_outdoor_mask_and_points(
+            x_coords,
+            y_coords,
+            geom,
+        )
+        outdoor_mask_source = "geometry_polygon"
 
     grid = {
         "min_x": min_x,
@@ -320,6 +380,8 @@ def build_rx_visibility_runtime(
         outdoor_mask=outdoor_mask,
         outdoor_points=outdoor_points,
         outdoor_point_lookup=outdoor_point_lookup,
+        building_mask_path=str(building_mask_path) if building_mask_path is not None else None,
+        outdoor_mask_source=outdoor_mask_source,
         acceleration_backend=resolved_backend,
         torch_device=resolved_torch_device,
         torch_geom=torch_geom,

@@ -5,7 +5,7 @@ from typing import Any
 from ..boundary import _add, _ray_segment_hit_parameter, _scale, _sub
 from ..coverage import _state_reaches_rx, _torch_evaluate_state_hits_from_indices
 from .runtime import PathFamilyRuntime, build_path_family_runtime
-from .types import PathFamily, RayHit
+from .types import DiffractionInteractionRef, PathFamily, RayHit
 
 
 def _family_hits_mask(
@@ -63,6 +63,7 @@ def compute_rx_rays_runtime(
     if runtime.los_family is not None:
         families.append(runtime.los_family)
     families.extend(runtime.reflection_families)
+    families.extend(runtime.diffraction_families)
 
     rx_hits: dict[tuple[int, int], list[RayHit]] = {}
 
@@ -90,7 +91,7 @@ def compute_rx_rays_runtime(
                     interaction_points=(),
                     path_points=(runtime.tx_point, rx_point),
                 )
-            else:
+            elif family.sequence == "R":
                 reflection_point = _reconstruct_reflection_point(runtime, family, rx_point)
                 if reflection_point is None:
                     continue
@@ -103,6 +104,21 @@ def compute_rx_rays_runtime(
                     interaction_types=("R",),
                     interaction_points=(reflection_point,),
                     path_points=(runtime.tx_point, reflection_point, rx_point),
+                )
+            else:
+                interaction_ref = family.interaction_ref
+                if not isinstance(interaction_ref, DiffractionInteractionRef):
+                    continue
+                diffraction_point = interaction_ref.point
+                ray_hit = RayHit(
+                    family_id=family.family_id,
+                    sequence=family.sequence,
+                    rx_row=row,
+                    rx_col=col,
+                    rx_point=rx_point,
+                    interaction_types=("D",),
+                    interaction_points=(diffraction_point,),
+                    path_points=(runtime.tx_point, diffraction_point, rx_point),
                 )
 
             rx_hits.setdefault((row, col), []).append(ray_hit)
@@ -140,6 +156,7 @@ def compute_rx_partition_runtime(
         "unreachable": 0,
         "L": 0,
         "R": 0,
+        "D": 0,
     }
     for row in range(height):
         for col in range(width):
@@ -155,6 +172,10 @@ def compute_rx_partition_runtime(
         if "R" in sequences:
             grid[row][col] = "R"
             counts["R"] += 1
+            continue
+        if "D" in sequences:
+            grid[row][col] = "D"
+            counts["D"] += 1
 
     counts["unreachable"] = sum(1 for row in grid for label in row if label == "unreachable")
     return {

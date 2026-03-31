@@ -16,13 +16,20 @@ class ReflectionInteractionRef:
 
 
 @dataclass(frozen=True)
+class DiffractionInteractionRef:
+    vertex_id: int
+    poly_id: int
+    point: tuple[float, float]
+
+
+@dataclass(frozen=True)
 class PathFamily:
     family_id: int
     sequence: str
     order: int
     parent_family_id: int | None
     interaction_kind: str
-    interaction_ref: ReflectionInteractionRef | None
+    interaction_ref: ReflectionInteractionRef | DiffractionInteractionRef | None
     state: PropagationState
 
 

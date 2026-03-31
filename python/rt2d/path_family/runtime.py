@@ -11,12 +11,11 @@ from ..boundary import (
 )
 from ..coverage import (
     PropagationState,
-    _expand_reflection_successors,
     _get_or_build_state_expansion,
     _make_state,
     build_rx_visibility_runtime,
 )
-from .types import PathFamily, ReflectionInteractionRef
+from .types import DiffractionInteractionRef, PathFamily, ReflectionInteractionRef
 
 
 @dataclass
@@ -28,6 +27,7 @@ class PathFamilyRuntime:
     geometry: GeometryIndex
     los_family: PathFamily | None = None
     reflection_families: tuple[PathFamily, ...] = ()
+    diffraction_families: tuple[PathFamily, ...] = ()
 
 
 def _build_reflection_interaction_refs(
@@ -98,9 +98,10 @@ def build_path_family_runtime(
         tx_id,
         1,
         enable_reflection=True,
-        enable_diffraction=False,
+        enable_diffraction=True,
     )
     reflection_states = [state for state in states_by_order.get(1, []) if state.sequence == "R"]
+    diffraction_states = [state for state in states_by_order.get(1, []) if state.sequence == "D"]
     interaction_refs = _build_reflection_interaction_refs(tx, geom)
 
     reflection_families: list[PathFamily] = []
@@ -120,6 +121,27 @@ def build_path_family_runtime(
             )
         )
 
+    next_family_id = len(reflection_families) + 1
+    diffraction_families: list[PathFamily] = []
+    for offset, state in enumerate(diffraction_states):
+        if state.source_vertex_id is None or state.source_poly_id is None:
+            continue
+        diffraction_families.append(
+            PathFamily(
+                family_id=next_family_id + offset,
+                sequence="D",
+                order=1,
+                parent_family_id=0,
+                interaction_kind="diffraction",
+                interaction_ref=DiffractionInteractionRef(
+                    vertex_id=state.source_vertex_id,
+                    poly_id=state.source_poly_id,
+                    point=state.source_point,
+                ),
+                state=state,
+            )
+        )
+
     return PathFamilyRuntime(
         scene_id=str(geom.scene_id),
         tx_id=tx_id,
@@ -128,4 +150,5 @@ def build_path_family_runtime(
         geometry=geom,
         los_family=los_family,
         reflection_families=tuple(reflection_families),
+        diffraction_families=tuple(diffraction_families),
     )

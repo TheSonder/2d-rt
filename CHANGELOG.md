@@ -164,3 +164,8 @@
 - 在 `feat/path-family-los-r-preview` 分支上新增最小 `LoS + R` 的 `path_family` 预览实现，新增 `python/rt2d/path_family/` 包，并可输出 `rx -> RayHit` 以及基于 `LoS` 优先、`R` 次之的分区图。
 - 新增 `python/examples/preview_path_family_los_r.py`，可直接将最小 `LoS + R` path-family 分区结果叠加到 `RadioMapSeer` 的建筑物 PNG 上做人工检查。
 - 新增 `tests/test_coverage.py` 中的最小 `path_family LoS + R` smoke test，验证新入口至少能在小场景上返回合法的 `blocked / unreachable / L / R` 分区标签。
+- 调整 `build_rx_visibility_runtime(...)`，当 scene 可解析到 `building_mask_path` 或 `root_dir/png/buildings_complete/<scene_id>.png` 时，`blocked / outdoor` 口径优先直接使用 `buildings_complete.png`，仅在找不到 png 时才回退到 polygon 点判定。
+- 新增对应测试，校验 runtime 在提供 `building_mask_path` 时确实优先使用 png，并验证 `path_family` 预览在 `RadioMapSeer` 样例上会走 `building_png` 口径。
+- 在 `feat/path-family-los-r-preview` 分支上将最小 `path_family` 预览从 `LoS + R` 扩展到 `LoS + R + D`，新增 `DiffractionInteractionRef` 与一阶 `D` family，并允许预览图输出 `blocked / unreachable / L / R / D` 五类标签。
+- 调整 `python/examples/preview_path_family_los_r.py` 的预览配色，新增 `D` 的蓝色覆盖，并在 `map 0, tx 0` 的 `RadioMapSeer buildings_complete` 底图上重新生成叠加图用于人工检查。
+- 新增 `tests/test_coverage.py` 中的 `path_family LoS + R + D` smoke test，验证最小新分支实现至少能在小场景上输出合法的 `D` 区域。

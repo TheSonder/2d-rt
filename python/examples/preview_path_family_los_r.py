@@ -17,6 +17,7 @@ import rt2d
 PARTITION_COLORS = {
     "L": (22, 163, 74, 160),
     "R": (245, 158, 11, 160),
+    "D": (59, 130, 246, 160),
 }
 
 
@@ -59,7 +60,7 @@ def _overlay_partition(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Preview path-family LoS + R partition over building PNG.")
+    parser = argparse.ArgumentParser(description="Preview path-family LoS + R + D partition over building PNG.")
     parser.add_argument("map_id", type=int, help="RadioMapSeer map id.")
     parser.add_argument("--tx-id", type=int, default=0, help="TX index.")
     parser.add_argument(
