@@ -55,6 +55,7 @@ def _reconstruct_reflection_point(
 def compute_rx_rays_runtime(
     runtime: PathFamilyRuntime,
     *,
+    max_order: int = 1,
     torch_state_chunk_size: int = 16,
     torch_point_chunk_size: int = 4096,
     torch_edge_chunk_size: int = 64,
@@ -64,6 +65,8 @@ def compute_rx_rays_runtime(
         families.append(runtime.los_family)
     families.extend(runtime.reflection_families)
     families.extend(runtime.diffraction_families)
+    if max_order >= 2:
+        families.extend(runtime.second_order_families)
 
     rx_hits: dict[tuple[int, int], list[RayHit]] = {}
 
@@ -105,7 +108,7 @@ def compute_rx_rays_runtime(
                     interaction_points=(reflection_point,),
                     path_points=(runtime.tx_point, reflection_point, rx_point),
                 )
-            else:
+            elif family.sequence == "D":
                 interaction_ref = family.interaction_ref
                 if not isinstance(interaction_ref, DiffractionInteractionRef):
                     continue
@@ -120,6 +123,17 @@ def compute_rx_rays_runtime(
                     interaction_points=(diffraction_point,),
                     path_points=(runtime.tx_point, diffraction_point, rx_point),
                 )
+            else:
+                ray_hit = RayHit(
+                    family_id=family.family_id,
+                    sequence=family.sequence,
+                    rx_row=row,
+                    rx_col=col,
+                    rx_point=rx_point,
+                    interaction_types=tuple(family.sequence),
+                    interaction_points=(),
+                    path_points=(runtime.tx_point, rx_point),
+                )
 
             rx_hits.setdefault((row, col), []).append(ray_hit)
 
@@ -133,12 +147,14 @@ def compute_rx_rays_runtime(
 def compute_rx_partition_runtime(
     runtime: PathFamilyRuntime,
     *,
+    max_order: int = 1,
     torch_state_chunk_size: int = 16,
     torch_point_chunk_size: int = 4096,
     torch_edge_chunk_size: int = 64,
 ) -> dict[str, Any]:
     rays_payload = compute_rx_rays_runtime(
         runtime,
+        max_order=max_order,
         torch_state_chunk_size=torch_state_chunk_size,
         torch_point_chunk_size=torch_point_chunk_size,
         torch_edge_chunk_size=torch_edge_chunk_size,
@@ -157,6 +173,10 @@ def compute_rx_partition_runtime(
         "L": 0,
         "R": 0,
         "D": 0,
+        "RR": 0,
+        "RD": 0,
+        "DR": 0,
+        "DD": 0,
     }
     for row in range(height):
         for col in range(width):
@@ -176,6 +196,13 @@ def compute_rx_partition_runtime(
         if "D" in sequences:
             grid[row][col] = "D"
             counts["D"] += 1
+            continue
+        if max_order >= 2:
+            for sequence in ("RR", "RD", "DR", "DD"):
+                if sequence in sequences:
+                    grid[row][col] = sequence
+                    counts[sequence] += 1
+                    break
 
     counts["unreachable"] = sum(1 for row in grid for label in row if label == "unreachable")
     return {
@@ -192,6 +219,8 @@ def compute_rx_partition(
     *,
     root_dir: str | None = None,
     tx_id: int = 0,
+    max_interactions: int = 2,
+    max_order: int = 1,
     grid_step: float = 1.0,
     bounds: tuple[float, float, float, float] | None = None,
     epsilon: float = 1.0e-6,
@@ -205,6 +234,7 @@ def compute_rx_partition(
         scene,
         root_dir=root_dir,
         tx_id=tx_id,
+        max_interactions=max_interactions,
         grid_step=grid_step,
         bounds=bounds,
         epsilon=epsilon,
@@ -213,6 +243,7 @@ def compute_rx_partition(
     )
     return compute_rx_partition_runtime(
         runtime,
+        max_order=max_order,
         torch_state_chunk_size=torch_state_chunk_size,
         torch_point_chunk_size=torch_point_chunk_size,
         torch_edge_chunk_size=torch_edge_chunk_size,

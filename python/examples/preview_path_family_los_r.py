@@ -18,6 +18,10 @@ PARTITION_COLORS = {
     "L": (22, 163, 74, 160),
     "R": (245, 158, 11, 160),
     "D": (59, 130, 246, 160),
+    "RR": (168, 85, 247, 160),
+    "RD": (236, 72, 153, 160),
+    "DR": (14, 165, 233, 160),
+    "DD": (99, 102, 241, 160),
 }
 
 
@@ -60,9 +64,10 @@ def _overlay_partition(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Preview path-family LoS + R + D partition over building PNG.")
+    parser = argparse.ArgumentParser(description="Preview path-family LoS + R + D + order2 partition over building PNG.")
     parser.add_argument("map_id", type=int, help="RadioMapSeer map id.")
     parser.add_argument("--tx-id", type=int, default=0, help="TX index.")
+    parser.add_argument("--max-order", type=int, choices=(1, 2), default=1, help="Partition order to render.")
     parser.add_argument(
         "--radiomapseer-root",
         type=Path,
@@ -92,11 +97,12 @@ def main() -> None:
     runtime = rt2d.build_path_family_runtime(
         scene,
         tx_id=args.tx_id,
+        max_interactions=max(args.max_order, 2),
         bounds=(0.0, 0.0, 255.0, 255.0),
         acceleration_backend=args.acceleration_backend,
         torch_device=args.torch_device,
     )
-    payload = rt2d.compute_path_family_partition_runtime(runtime)
+    payload = rt2d.compute_path_family_partition_runtime(runtime, max_order=args.max_order)
 
     base_image_path = args.radiomapseer_root / "png" / "buildings_complete" / f"{args.map_id}.png"
     output_path = args.output or Path("build") / f"path_family_map_{args.map_id}_tx_{args.tx_id}.png"
@@ -104,6 +110,7 @@ def main() -> None:
 
     print(f"scene_id: {payload['scene_id']}")
     print(f"tx_id: {payload['tx_id']}")
+    print(f"max_order: {args.max_order}")
     print(f"counts: {payload['counts']}")
     print(f"output: {output_path}")
 

@@ -25,9 +25,11 @@ class PathFamilyRuntime:
     tx_point: tuple[float, float]
     rx_runtime: Any
     geometry: GeometryIndex
+    max_interactions: int
     los_family: PathFamily | None = None
     reflection_families: tuple[PathFamily, ...] = ()
     diffraction_families: tuple[PathFamily, ...] = ()
+    second_order_families: tuple[PathFamily, ...] = ()
 
 
 def _build_reflection_interaction_refs(
@@ -62,6 +64,7 @@ def build_path_family_runtime(
     *,
     root_dir: str | None = None,
     tx_id: int = 0,
+    max_interactions: int = 2,
     grid_step: float = 1.0,
     bounds: tuple[float, float, float, float] | None = None,
     epsilon: float = 1.0e-6,
@@ -96,7 +99,7 @@ def build_path_family_runtime(
     states_by_order, _sequence_groups_by_order = _get_or_build_state_expansion(
         rx_runtime,
         tx_id,
-        1,
+        max_interactions,
         enable_reflection=True,
         enable_diffraction=True,
     )
@@ -142,13 +145,32 @@ def build_path_family_runtime(
             )
         )
 
+    next_family_id = len(reflection_families) + len(diffraction_families) + 1
+    second_order_families: list[PathFamily] = []
+    for offset, state in enumerate(states_by_order.get(2, [])):
+        if state.sequence not in {"RR", "RD", "DR", "DD"}:
+            continue
+        second_order_families.append(
+            PathFamily(
+                family_id=next_family_id + offset,
+                sequence=state.sequence,
+                order=2,
+                parent_family_id=None,
+                interaction_kind=state.interaction_kind,
+                interaction_ref=None,
+                state=state,
+            )
+        )
+
     return PathFamilyRuntime(
         scene_id=str(geom.scene_id),
         tx_id=tx_id,
         tx_point=tx,
         rx_runtime=rx_runtime,
         geometry=geom,
+        max_interactions=max_interactions,
         los_family=los_family,
         reflection_families=tuple(reflection_families),
         diffraction_families=tuple(diffraction_families),
+        second_order_families=tuple(second_order_families),
     )

@@ -438,6 +438,34 @@ def _make_state(
     )
 
 
+def _make_directional_state(
+    sequence: str,
+    source_point: Point,
+    left_dir: Point,
+    right_dir: Point,
+    *,
+    exclude_edge_ids: tuple[int, ...] = (),
+    interaction_kind: str = "root",
+    source_poly_id: int | None = None,
+    source_vertex_id: int | None = None,
+) -> PropagationState:
+    return PropagationState(
+        sequence=sequence,
+        source_point=source_point,
+        apex=source_point,
+        left_dir=left_dir,
+        right_dir=right_dir,
+        boundary_points=(
+            _add(source_point, left_dir),
+            _add(source_point, right_dir),
+        ),
+        exclude_edge_ids=exclude_edge_ids,
+        interaction_kind=interaction_kind,
+        source_poly_id=source_poly_id,
+        source_vertex_id=source_vertex_id,
+    )
+
+
 def _state_key(state: PropagationState, eps: float) -> tuple[Any, ...]:
     scale = max(1.0 / max(eps, 1.0e-9), 1.0e3)
 
@@ -925,6 +953,62 @@ def _is_state_vertex_critical(
     return left != right
 
 
+def _mid_direction_for_ccw_interval(left_dir: Point, right_dir: Point) -> tuple[Point, float]:
+    left_angle = math.atan2(left_dir[1], left_dir[0])
+    right_angle = math.atan2(right_dir[1], right_dir[0])
+    delta = (right_angle - left_angle) % (2.0 * math.pi)
+    mid_angle = left_angle + delta * 0.5
+    return ((math.cos(mid_angle), math.sin(mid_angle)), delta)
+
+
+def _diffraction_wedge_dirs(
+    state: PropagationState,
+    vertex: VertexRecord,
+    geom: GeometryIndex,
+) -> tuple[Point, Point] | None:
+    incident_dir = _normalize(_sub(vertex.point, state.source_point), 1.0e-12)
+    if incident_dir is None:
+        return None
+
+    prev_edge = geom.edges[vertex.prev_edge_id]
+    next_edge = geom.edges[vertex.next_edge_id]
+    prev_point = geom.vertices[prev_edge.start_vertex_id].point
+    next_point = geom.vertices[next_edge.end_vertex_id].point
+
+    edge_dirs = [
+        _normalize(_sub(prev_point, vertex.point), 1.0e-12),
+        _normalize(_sub(next_point, vertex.point), 1.0e-12),
+    ]
+    candidates: list[tuple[Point, Point]] = []
+    for edge_dir in edge_dirs:
+        if edge_dir is None:
+            continue
+        candidates.append((incident_dir, edge_dir))
+        candidates.append((edge_dir, incident_dir))
+
+    best_dirs: tuple[Point, Point] | None = None
+    best_delta: float | None = None
+    for left_dir, right_dir in candidates:
+        sample_dir, delta = _mid_direction_for_ccw_interval(left_dir, right_dir)
+        if not _has_outward_departure(vertex.point, sample_dir, vertex.poly_id, geom):
+            continue
+        if best_delta is None or delta < best_delta:
+            best_dirs = (left_dir, right_dir)
+            best_delta = delta
+
+    if best_dirs is not None:
+        return best_dirs
+
+    fallback: tuple[Point, Point] | None = None
+    fallback_delta: float | None = None
+    for left_dir, right_dir in candidates:
+        _sample_dir, delta = _mid_direction_for_ccw_interval(left_dir, right_dir)
+        if fallback_delta is None or delta < fallback_delta:
+            fallback = (left_dir, right_dir)
+            fallback_delta = delta
+    return fallback
+
+
 def _expand_reflection_successors(
     state: PropagationState,
     geom: GeometryIndex,
@@ -987,11 +1071,15 @@ def _expand_diffraction_successors(
                 )
             )
         )
+        wedge_dirs = _diffraction_wedge_dirs(state, vertex, geom)
+        if wedge_dirs is None:
+            continue
         children.append(
-            _make_state(
+            _make_directional_state(
                 sequence,
                 vertex.point,
-                None,
+                wedge_dirs[0],
+                wedge_dirs[1],
                 exclude_edge_ids=exclude_edge_ids,
                 interaction_kind="diffraction",
                 source_poly_id=vertex.poly_id,

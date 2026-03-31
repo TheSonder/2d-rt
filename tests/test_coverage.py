@@ -335,6 +335,48 @@ class RxCoverageTests(unittest.TestCase):
         self.assertEqual(_label_at(payload, 0, 4.0, 4.0), 1)
         self.assertEqual(_label_at(payload, 0, 4.0, 0.0), -1)
 
+    def test_diffraction_only_second_order_does_not_collapse_all_first_order_hits(self) -> None:
+        scene = {
+            "scene_id": "diff-order-split",
+            "antenna": [[-2.0, 1.0]],
+            "polygons": [
+                [[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0], [0.0, 0.0]],
+                [[6.0, 0.0], [8.0, 0.0], [8.0, 2.0], [6.0, 2.0], [6.0, 0.0]],
+                [[3.0, 4.0], [5.0, 4.0], [5.0, 5.0], [3.0, 5.0], [3.0, 4.0]],
+            ],
+        }
+
+        payload = rt2d.compute_rx_visibility(
+            scene,
+            tx_ids=[0],
+            max_interactions=2,
+            bounds=(-3.0, -3.0, 10.0, 8.0),
+            enable_reflection=False,
+            include_sequence_render_grid=True,
+            include_sequence_hit_grids=True,
+            acceleration_backend="cpu",
+        )
+
+        tx_result = payload["tx_results"][0]
+        sequence_hit_grids = tx_result["sequence_hit_grids"]
+        los_grid = sequence_hit_grids["L"]
+        d_grid = sequence_hit_grids["D"]
+        dd_grid = sequence_hit_grids["DD"]
+
+        d_only = 0
+        dd_only = 0
+        for row in range(len(los_grid)):
+            for col in range(len(los_grid[0])):
+                if los_grid[row][col]:
+                    continue
+                if d_grid[row][col] and not dd_grid[row][col]:
+                    d_only += 1
+                if dd_grid[row][col] and not d_grid[row][col]:
+                    dd_only += 1
+
+        self.assertGreater(d_only, 0)
+        self.assertGreater(dd_only, 0)
+
     def test_second_order_reflection_only_marks_after_first_order(self) -> None:
         scene = {
             "scene_id": "left-wall-2",
