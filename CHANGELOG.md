@@ -161,3 +161,6 @@
 - 在 `rt2d_env` 的 runtime 复用模式下，`scene 0` 的 GPU 预处理约 `12.4s`，随后单个 `tx 0`、`max_interactions=1` 的推理约 `2.7s ~ 4.3s`，可将“场景预处理”和“单次推理”拆开计时。
 - 在 `rt2d_env` 的 runtime + state cache 路径下，`scene 0, tx 0, max_interactions=1` 的单次推理稳定在约 `2.5s`，同一 runtime 上重复推理时不再重复构建 `state expansion / TorchStateBatch`。
 - 清理 `python/rt2d/coverage.py` 中旧的 `compute_rx_visibility(...)` 残留死代码，当前入口已经统一走 runtime 路径。
+- 在 `feat/path-family-los-r-preview` 分支上新增最小 `LoS + R` 的 `path_family` 预览实现，新增 `python/rt2d/path_family/` 包，并可输出 `rx -> RayHit` 以及基于 `LoS` 优先、`R` 次之的分区图。
+- 新增 `python/examples/preview_path_family_los_r.py`，可直接将最小 `LoS + R` path-family 分区结果叠加到 `RadioMapSeer` 的建筑物 PNG 上做人工检查。
+- 新增 `tests/test_coverage.py` 中的最小 `path_family LoS + R` smoke test，验证新入口至少能在小场景上返回合法的 `blocked / unreachable / L / R` 分区标签。

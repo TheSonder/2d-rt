@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python"))
 
 import rt2d
+from rt2d.path_family import build_path_family_runtime, compute_rx_partition_runtime
 from rt2d.coverage import SequenceCostConfig, build_energy_pruned_sequence_render_grid, build_layered_sequence_render_grid
 
 
@@ -25,6 +26,27 @@ def _label_at(payload: dict[str, object], tx_index: int, x: float, y: float) -> 
 
 
 class RxCoverageTests(unittest.TestCase):
+    def test_path_family_los_r_partition_runs_on_small_scene(self) -> None:
+        scene = {
+            "scene_id": "path-family-preview",
+            "antenna": [[-2.0, 2.0]],
+            "polygons": [
+                [[0.0, 0.0], [2.0, 0.0], [2.0, 4.0], [0.0, 4.0], [0.0, 0.0]],
+            ],
+        }
+
+        runtime = build_path_family_runtime(
+            scene,
+            tx_id=0,
+            bounds=(-3.0, -1.0, 6.0, 6.0),
+            acceleration_backend="cpu",
+        )
+        payload = compute_rx_partition_runtime(runtime)
+
+        labels = {label for row in payload["partition_grid"] for label in row}
+        self.assertIn("L", labels)
+        self.assertTrue(labels.issubset({"blocked", "unreachable", "L", "R"}))
+
     def test_runtime_builder_matches_direct_compute_on_small_scene(self) -> None:
         scene = {
             "scene_id": "runtime-compare",

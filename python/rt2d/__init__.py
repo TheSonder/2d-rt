@@ -16,6 +16,12 @@ from .coverage import (
     compute_rx_visibility_runtime,
     warm_rx_visibility_runtime,
 )
+from .path_family import (
+    build_path_family_runtime,
+    compute_rx_partition as compute_path_family_partition,
+    compute_rx_partition_runtime as compute_path_family_partition_runtime,
+    compute_rx_rays_runtime,
+)
 from .loader import load_library
 from .scene import load_scene
 
@@ -34,8 +40,12 @@ def raytrace(
 
 __all__ = [
     "build_geometry",
+    "build_path_family_runtime",
     "build_rx_visibility_runtime",
     "compute_visible_subsegments",
+    "compute_path_family_partition",
+    "compute_path_family_partition_runtime",
+    "compute_rx_rays_runtime",
     "compute_rx_visibility",
     "compute_rx_visibility_runtime",
     "warm_rx_visibility_runtime",
