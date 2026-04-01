@@ -1447,15 +1447,15 @@ def compute_rx_visibility_runtime(
                 counts["blocked"] += 1
 
         sequence_hit_grids: dict[str, list[list[int]]] | None = None
-        if include_sequence_render_grid:
+        if include_sequence_render_grid or include_sequence_hit_grids:
             sequence_hit_grids = {"L": _make_grid(height, width)}
             for groups in sequence_groups_by_order.values():
                 for sequence in groups:
                     sequence_hit_grids.setdefault(sequence, _make_grid(height, width))
 
         outdoor_entries = list(runtime.outdoor_points)
+        point_indices = list(range(len(outdoor_entries)))
         if runtime.acceleration_backend == "torch" and runtime.torch_geom is not None:
-            point_indices = list(range(len(outdoor_entries)))
             los_hits, _los_sequence_hits = _torch_evaluate_state_hits_from_indices(
                 None,
                 point_indices,
@@ -1487,28 +1487,44 @@ def compute_rx_visibility_runtime(
                 continue
 
             if runtime.acceleration_backend == "torch" and runtime.torch_geom is not None:
-                state_hits, sequence_hits = _torch_evaluate_state_hits_from_indices(
-                    None,
-                    remaining_point_indices,
-                    runtime,
-                    torch_state_chunk_size,
-                    torch_point_chunk_size,
-                    torch_edge_chunk_size,
-                    state_batch=torch_state_batches.get(depth),
-                )
-                if sequence_hit_grids is not None and sequence_groups:
-                    for sequence in sequence_groups:
-                        hits = sequence_hits.get(sequence)
-                        if hits is None:
-                            continue
-                        for index, (row, col, _point) in enumerate(remaining):
-                            if hits[index]:
-                                sequence_hit_grids[sequence][row][col] = 1
+                state_hits_for_visibility: list[bool]
+                if sequence_hit_grids is not None:
+                    full_state_hits, full_sequence_hits = _torch_evaluate_state_hits_from_indices(
+                        None,
+                        point_indices,
+                        runtime,
+                        torch_state_chunk_size,
+                        torch_point_chunk_size,
+                        torch_edge_chunk_size,
+                        state_batch=torch_state_batches.get(depth),
+                    )
+                    if sequence_groups:
+                        for sequence in sequence_groups:
+                            hits = full_sequence_hits.get(sequence)
+                            if hits is None:
+                                continue
+                            for point_index, (row, col, _point) in enumerate(outdoor_entries):
+                                if hits[point_index]:
+                                    sequence_hit_grids[sequence][row][col] = 1
+                    state_hits_for_visibility = [
+                        full_state_hits[point_index]
+                        for point_index in remaining_point_indices
+                    ]
+                else:
+                    state_hits_for_visibility, _sequence_hits = _torch_evaluate_state_hits_from_indices(
+                        None,
+                        remaining_point_indices,
+                        runtime,
+                        torch_state_chunk_size,
+                        torch_point_chunk_size,
+                        torch_edge_chunk_size,
+                        state_batch=torch_state_batches.get(depth),
+                    )
 
                 next_remaining: list[tuple[int, int, Point]] = []
                 next_remaining_indices: list[int] = []
                 for index, (row, col, point) in enumerate(remaining):
-                    if state_hits[index]:
+                    if state_hits_for_visibility[index]:
                         visibility_order_grid[row][col] = depth
                         counts[f"order{depth}"] += 1
                     else:
@@ -1518,16 +1534,28 @@ def compute_rx_visibility_runtime(
                 remaining_point_indices = next_remaining_indices
                 continue
 
+            state_hits_for_visibility: list[bool]
             if sequence_hit_grids is not None and sequence_groups:
-                for row, col, point in remaining:
+                full_state_hits = [False for _ in outdoor_entries]
+                for point_index, (row, col, point) in enumerate(outdoor_entries):
                     for sequence, grouped_states in sequence_groups.items():
                         if any(_state_reaches_rx(state, point, runtime.geom) for state in grouped_states):
                             sequence_hit_grids[sequence][row][col] = 1
+                            full_state_hits[point_index] = True
+                state_hits_for_visibility = [
+                    full_state_hits[point_index]
+                    for point_index in remaining_point_indices
+                ]
+            else:
+                state_hits_for_visibility = [
+                    any(_state_reaches_rx(state, point, runtime.geom) for state in states)
+                    for _row, _col, point in remaining
+                ]
 
             next_remaining: list[tuple[int, int, Point]] = []
             next_remaining_indices: list[int] = []
             for index, (row, col, point) in enumerate(remaining):
-                if any(_state_reaches_rx(state, point, runtime.geom) for state in states):
+                if state_hits_for_visibility[index]:
                     visibility_order_grid[row][col] = depth
                     counts[f"order{depth}"] += 1
                 else:

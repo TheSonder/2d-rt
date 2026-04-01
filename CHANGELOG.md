@@ -6,12 +6,15 @@
 - 修正 `python/rt2d/coverage.py` 中的 diffraction 状态展开：绕射子状态现在会携带由绕射顶点相邻边外延构成的角域约束，不再退化成无方向限制的“点源”。
 - 调整二阶纯绕射的可达性边界，避免 `DD` 在纯绕射模式下因为缺少角域约束而异常吞并大范围一阶 `D` 命中。
 - 为 `tests/test_coverage.py` 新增纯绕射二阶回归测试，校验在关闭反射时，`D` 与 `DD` 至少能形成部分非重合区域。
+- 修正 `compute_rx_visibility(...)` 的 `sequence_hit_grids` 生成逻辑：现在会对全部 outdoor grid 记录每个序列的全量命中，不再因为较低阶已经可达而漏掉同格点上的高阶或非最小阶命中。
+- 为 `tests/test_coverage.py` 新增序列命中回归测试，校验 `sequence_hit_grids` 会保留同一格点上的 `D` 与 `DD` 重叠命中。
 
 ### Breaking
 - 无兼容性影响。
 
 ### Migration
 - 如需评估纯绕射一阶/二阶区域，继续使用 `rt2d.compute_rx_visibility(..., enable_reflection=False, enable_diffraction=True)`；当前版本的 `D` / `DD` 结果已经包含新的绕射角域约束。
+- 如需统计每个栅格的 `L / R / D / RR / RD / DR / DD` 全量命中，调用 `rt2d.compute_rx_visibility(..., include_sequence_render_grid=True, include_sequence_hit_grids=True)`；当前版本导出的 `sequence_hit_grids` 已包含非最小阶重叠命中。
 
 ## 2026-03-28
 

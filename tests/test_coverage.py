@@ -377,6 +377,40 @@ class RxCoverageTests(unittest.TestCase):
         self.assertGreater(d_only, 0)
         self.assertGreater(dd_only, 0)
 
+    def test_sequence_hit_grids_preserve_higher_order_hits_on_lower_order_cells(self) -> None:
+        scene = {
+            "scene_id": "diff-order-split",
+            "antenna": [[-2.0, 1.0]],
+            "polygons": [
+                [[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0], [0.0, 0.0]],
+                [[6.0, 0.0], [8.0, 0.0], [8.0, 2.0], [6.0, 2.0], [6.0, 0.0]],
+                [[3.0, 4.0], [5.0, 4.0], [5.0, 5.0], [3.0, 5.0], [3.0, 4.0]],
+            ],
+        }
+
+        payload = rt2d.compute_rx_visibility(
+            scene,
+            tx_ids=[0],
+            max_interactions=2,
+            bounds=(-3.0, -3.0, 10.0, 8.0),
+            enable_reflection=False,
+            include_sequence_render_grid=True,
+            include_sequence_hit_grids=True,
+            acceleration_backend="cpu",
+        )
+
+        tx_result = payload["tx_results"][0]
+        sequence_hit_grids = tx_result["sequence_hit_grids"]
+        overlap = 0
+        for row in range(len(sequence_hit_grids["L"])):
+            for col in range(len(sequence_hit_grids["L"][0])):
+                if sequence_hit_grids["L"][row][col]:
+                    continue
+                if sequence_hit_grids["D"][row][col] and sequence_hit_grids["DD"][row][col]:
+                    overlap += 1
+
+        self.assertGreater(overlap, 0)
+
     def test_second_order_reflection_only_marks_after_first_order(self) -> None:
         scene = {
             "scene_id": "left-wall-2",
